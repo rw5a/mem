@@ -359,3 +359,6 @@ html[data-theme="dark"] {
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* Sign-in: "Keep me signed in" hint sits just under its checkbox */
+#remember-hint { margin: .15rem 0 0 1.85rem; }
