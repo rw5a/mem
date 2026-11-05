@@ -35,7 +35,7 @@ const CONFIG = Object.freeze({
     //email:   "info@example.org",
     //website: "https://example.org"
 const ORG = Object.freeze({
-    name:    "Arkansas Climbers Coalition - User Portal",
+    name:    "Arkansas Climbers Coalition",
     logo_url: "",                       // e.g. "logo.png" or "https://.../logo.svg"
     address: "Arkansas",
     phone:   "000-000-00000",
