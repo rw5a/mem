@@ -1,0 +1,4 @@
+# Generated / local-only Supabase settings - never commit
+public/env.js
+.env
+.env.local
