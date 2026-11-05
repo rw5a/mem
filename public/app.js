@@ -39,20 +39,68 @@ function addCell(row, text) {
     td.textContent = text;
     row.appendChild(td);
 }
+// ---- Event times: one fixed time zone for everyone ------------------
+// Events happen at a physical place, so every viewer sees the event's local
+// time (ORG.timezone in config.js), no matter what time zone their own phone
+// or computer is set to. If ORG.timezone is blank or invalid, the viewer's
+// device time zone is used as a fallback.
+const EVENT_TZ = (function () {
+    const wanted = (typeof ORG !== "undefined" && ORG.timezone) ? String(ORG.timezone).trim() : "";
+    if (wanted) {
+        try { new Intl.DateTimeFormat("en-US", { timeZone: wanted }); return wanted; }
+        catch (err) { console.error("ORG.timezone is not a valid IANA time zone: " + wanted); }
+    }
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+})();
+const TZ_PARTS_FMT = new Intl.DateTimeFormat("en-US", {
+    timeZone: EVENT_TZ, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+});
+// Wall-clock pieces of an instant, as seen in EVENT_TZ.
+function tzParts(ms) {
+    const out = {};
+    TZ_PARTS_FMT.formatToParts(new Date(ms)).forEach(function (p) { out[p.type] = p.value; });
+    return { y: +out.year, mo: +out.month, d: +out.day, h: +out.hour % 24, mi: +out.minute, s: +out.second };
+}
+// How far EVENT_TZ is ahead of UTC at a given instant, in ms (handles DST).
+function tzOffsetMs(ms) {
+    const p = tzParts(ms);
+    return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s) - (ms - (ms % 1000));
+}
 function fmtDT(s) {
     if (!s) { return "\u2014"; }
     const d = new Date(s);
     if (isNaN(d.getTime())) { return s; }
-    return d.toLocaleString(undefined,
-        { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+    return d.toLocaleString(undefined, {
+        timeZone: EVENT_TZ, timeZoneName: "short",
+        month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit"
+    });
 }
+// Stored UTC timestamp -> "YYYY-MM-DDTHH:MM" in EVENT_TZ for <input type="datetime-local">.
 function toLocalInput(iso) {
     if (!iso) { return ""; }
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) { return ""; }
+    const ms = new Date(iso).getTime();
+    if (isNaN(ms)) { return ""; }
+    const p = tzParts(ms);
     const pad = function (n) { return String(n).padStart(2, "0"); };
-    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
-        + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    return p.y + "-" + pad(p.mo) + "-" + pad(p.d) + "T" + pad(p.h) + ":" + pad(p.mi);
+}
+// "YYYY-MM-DDTHH:MM" typed in EVENT_TZ -> full ISO timestamp in UTC for the database.
+// (Sending the bare input value made Postgres treat it as UTC, shifting every event.)
+function fromLocalInput(value) {
+    if (!value) { return null; }
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value);
+    if (!m) { return null; }
+    const asUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+    let ms = asUtc - tzOffsetMs(asUtc);
+    const recheck = asUtc - tzOffsetMs(ms);       // correct guesses near a DST change
+    if (recheck !== ms) { ms = recheck; }
+    return new Date(ms).toISOString();
+}
+// CSV-friendly "YYYY-MM-DD HH:MM" in EVENT_TZ.
+function fmtCsvDT(iso) {
+    const v = toLocalInput(iso);
+    return v ? v.replace("T", " ") : "";
 }
 function formatPhone(value) {
     const d = (value || "").replace(/\D/g, "").slice(0, 10);
@@ -715,13 +763,13 @@ async function onExportMembers() {
 async function onExportHours() {
     try {
         const rows = await adminFetchAllHours();
-        const cols = ["name", "email", "is_member", "event", "event_start",
+        const cols = ["name", "email", "is_member", "event", "event_start (" + EVENT_TZ + ")",
             "event_location", "event_hours", "travel_hours", "total_hours", "notes"];
         downloadFile("hours.csv", rowsToCsv(cols, rows, function (r) {
             const m = r.members || {}, e = r.events || {};
             const name = [m.first_name, m.last_name].filter(Boolean).join(" ");
             return [name, m.email || "", m.is_member ? "yes" : "no", e.name || "",
-                e.start_at || "", e.location || "", r.hours, r.travel_time, r.total_hours, r.notes || ""];
+                fmtCsvDT(e.start_at), e.location || "", r.hours, r.travel_time, r.total_hours, r.notes || ""];
         }));
         setStatus("members-status", "Exported " + rows.length + " hour entries.", false);
     } catch (err) { setStatus("members-status", err.message, true); }
@@ -899,8 +947,8 @@ async function onCreateEvent(event) {
         setStatus("events-status", "Name and start time are required.", true); return; }
     if (end && end < start) { setStatus("events-status", "End time must be after start time.", true); return; }
     try {
-        await adminCreateEvent({ name: $("ev_name").value.trim(), start_at: start,
-            end_at: end || null, location: $("ev_location").value.trim(),
+        await adminCreateEvent({ name: $("ev_name").value.trim(), start_at: fromLocalInput(start),
+            end_at: fromLocalInput(end), location: $("ev_location").value.trim(),
             description: $("ev_desc").value.trim() });
         setStatus("events-status", "Event created.", false);
         $("create-event-form").reset();
@@ -923,7 +971,7 @@ async function onSaveEvent(event) {
     if (end && end < start) { setStatus("edit-event-status", "End time must be after start time.", true); return; }
     try {
         await adminUpdateEvent(selectedEventId, { name: $("ee_name").value.trim(),
-            start_at: start, end_at: end || null, location: $("ee_location").value.trim(),
+            start_at: fromLocalInput(start), end_at: fromLocalInput(end), location: $("ee_location").value.trim(),
             description: $("ee_desc").value.trim() });
         setStatus("edit-event-status", "Event updated.", false);
         await loadAdminEvents(); await loadSummary();
@@ -1411,6 +1459,10 @@ function renderAdminDash() {
 // ---- Wire up -------------------------------------------------------
 window.addEventListener("DOMContentLoaded", function () {
     initOrg();
+    document.querySelectorAll(".tz-note").forEach(function (el) {
+        el.textContent = "Start and end times are in " + EVENT_TZ.replace(/_/g, " ")
+            + " time (set by ORG.timezone in config.js).";
+    });
     initTabs();
     initThemeToggle();
     initTableFilters();
