@@ -1,38 +1,139 @@
 // api.js - Minimal Supabase client built on the browser Fetch API only.
 "use strict";
 
-const AUTH_BASE   = CONFIG.SUPABASE_URL + "/auth/v1";
-const REST_BASE   = CONFIG.SUPABASE_URL + "/rest/v1";
-const SESSION_KEY = "mmp.session";
+// If config.js failed to load or has a typo, CONFIG won't exist. Guard here so
+// that problem is reported clearly (see checkStartupConfig in app.js) instead of
+// surfacing later as "Cannot access 'AUTH_BASE' before initialization".
+const SUPABASE_BASE = (typeof CONFIG !== "undefined" && CONFIG.SUPABASE_URL) ? CONFIG.SUPABASE_URL : "";
+const AUTH_BASE   = SUPABASE_BASE + "/auth/v1";
+const REST_BASE   = SUPABASE_BASE + "/rest/v1";
+const SESSION_KEY  = "mmp.session";
+const REMEMBER_KEY = "mmp.remember";     // "1" = keep signed in on this device
 
-function saveSession(session) { sessionStorage.setItem(SESSION_KEY, JSON.stringify(session)); }
+// ---- Where the sign-in is stored ------------------------------------
+// "Keep me signed in" -> localStorage (survives closing the tab/browser).
+// Otherwise          -> sessionStorage (cleared when the tab closes).
+function rememberDevice() {
+    try { return localStorage.getItem(REMEMBER_KEY) === "1"; } catch (err) { return false; }
+}
+function setRememberDevice(on) {
+    try {
+        if (on) { localStorage.setItem(REMEMBER_KEY, "1"); }
+        else { localStorage.removeItem(REMEMBER_KEY); }
+    } catch (err) { /* storage blocked; falls back to tab-only */ }
+}
+function sessionStore() {
+    try { return rememberDevice() ? localStorage : sessionStorage; } catch (err) { return sessionStorage; }
+}
+function saveSession(session) {
+    if (session && !session.expires_at && session.expires_in) {
+        session.expires_at = Math.floor(Date.now() / 1000) + Number(session.expires_in);
+    }
+    clearSession();
+    sessionStore().setItem(SESSION_KEY, JSON.stringify(session));
+}
 function loadSession() {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (raw === null) { return null; }
+    let raw = null;
+    try { raw = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY); }
+    catch (err) { raw = null; }
+    if (!raw) { return null; }
     try { return JSON.parse(raw); } catch (err) { return null; }
 }
-function clearSession() { sessionStorage.removeItem(SESSION_KEY); }
+function clearSession() {
+    try { sessionStorage.removeItem(SESSION_KEY); } catch (err) { /* ignore */ }
+    try { localStorage.removeItem(SESSION_KEY); } catch (err) { /* ignore */ }
+}
+
+// ---- Automatic sign-in renewal ---------------------------------------
+// Supabase access tokens expire after about an hour. Before each signed-in
+// request we renew the token if it's about to expire, and if a request is
+// still rejected as expired we renew once and retry. Only one renewal runs
+// at a time (refresh tokens are single-use).
+const REFRESH_MARGIN_SECONDS = 90;
+let refreshInFlight = null;
+
+function tokenExpiringSoon(session) {
+    if (!session || !session.expires_at) { return false; }
+    return session.expires_at - Math.floor(Date.now() / 1000) < REFRESH_MARGIN_SECONDS;
+}
+function refreshSession() {
+    if (refreshInFlight) { return refreshInFlight; }
+    refreshInFlight = (async function () {
+        const session = loadSession();
+        if (!session || !session.refresh_token) { throw sessionEndedError(); }
+        const response = await fetch(AUTH_BASE + "/token?grant_type=refresh_token", {
+            method: "POST", headers: anonHeaders(),
+            body: JSON.stringify({ refresh_token: session.refresh_token })
+        });
+        const text = await response.text();
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch (err) { body = null; }
+        if (!response.ok) {
+            // 400/401 = the refresh token is no longer valid -> truly signed out.
+            // Anything else (offline, server hiccup) -> keep the session and let the user retry.
+            if (response.status === 400 || response.status === 401) {
+                clearSession();
+                throw sessionEndedError();
+            }
+            throw new Error((body && (body.msg || body.error_description)) || "Couldn't reach the server. Please try again.");
+        }
+        saveSession(body);
+        return body;
+    })();
+    refreshInFlight.finally(function () { refreshInFlight = null; }).catch(function () {});
+    return refreshInFlight;
+}
+function sessionEndedError() {
+    const err = new Error("Your sign-in has ended. Please sign in again.");
+    err.sessionEnded = true;
+    try { window.dispatchEvent(new CustomEvent("mmp:session-ended")); } catch (e) { /* ignore */ }
+    return err;
+}
+function hasBearer(options) {
+    return !!(options && options.headers && options.headers["Authorization"]);
+}
+function looksExpired(status, body) {
+    if (status !== 401 && status !== 403) { return false; }
+    const msg = String((body && (body.message || body.msg || body.code)) || "").toLowerCase();
+    return status === 401 || msg.indexOf("jwt") >= 0 || msg.indexOf("expired") >= 0;
+}
 
 async function apiFetch(url, options) {
     const result = await apiFetchFull(url, options);
     return result.body;
 }
 async function apiFetchFull(url, options) {
-    const response = await fetch(url, options);
-    const text = await response.text();
+    if (hasBearer(options) && tokenExpiringSoon(loadSession())) {
+        const fresh = await refreshSession();
+        options.headers["Authorization"] = "Bearer " + fresh.access_token;
+    }
+    let response = await fetch(url, options);
+    let text = await response.text();
     let body = null;
     if (text.length > 0) {
         try { body = JSON.parse(text); } catch (err) { body = text; }
     }
+    if (!response.ok && hasBearer(options) && looksExpired(response.status, body)) {
+        const fresh = await refreshSession();
+        options.headers["Authorization"] = "Bearer " + fresh.access_token;
+        response = await fetch(url, options);
+        text = await response.text();
+        body = null;
+        if (text.length > 0) {
+            try { body = JSON.parse(text); } catch (err) { body = text; }
+        }
+    }
     if (!response.ok) {
         const message = (body && (body.msg || body.message || body.error_description))
             || response.statusText;
-        throw new Error(message);
+        const err = new Error(message);
+        err.status = response.status;
+        throw err;
     }
     return { body: body, headers: response.headers };
 }
 function anonHeaders() {
-    return { "Content-Type": "application/json", "apikey": CONFIG.SUPABASE_PUBLISHABLE_KEY };
+    return { "Content-Type": "application/json", "apikey": (typeof CONFIG !== "undefined" ? CONFIG.SUPABASE_PUBLISHABLE_KEY : "") };
 }
 function authHeaders() {
     const session = loadSession();
@@ -59,17 +160,20 @@ async function verifyLoginCode(email, code) {
     saveSession(session);
     return session;
 }
-async function refreshSession() {
+// Signs out: tells Supabase to revoke the refresh token (best-effort, so a
+// remembered device can't be reused), then clears the local copy.
+async function logout() {
     const session = loadSession();
-    if (!session || !session.refresh_token) { throw new Error("No active session"); }
-    const next = await apiFetch(AUTH_BASE + "/token?grant_type=refresh_token", {
-        method: "POST", headers: anonHeaders(),
-        body: JSON.stringify({ refresh_token: session.refresh_token })
-    });
-    saveSession(next);
-    return next;
+    if (session && session.access_token) {
+        try {
+            await fetch(AUTH_BASE + "/logout", {
+                method: "POST",
+                headers: Object.assign(anonHeaders(), { "Authorization": "Bearer " + session.access_token })
+            });
+        } catch (err) { /* offline: still clear locally */ }
+    }
+    clearSession();
 }
-function logout() { clearSession(); }
 function sessionEmail() {
     const s = loadSession();
     return s && s.user ? s.user.email : "";
