@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Membership Portal</title>
+<script>
+  // Apply saved theme before first paint (light is the default).
+  (function () { try { if (localStorage.getItem("mmp.theme") === "dark") { document.documentElement.setAttribute("data-theme", "dark"); } } catch (e) {} })();
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="va-header">
+  <div class="header-inner">
+    <div class="brand">
+      <img id="org-logo" alt="" hidden>
+      <span class="org-name" id="org-name"></span>
+      <h1 class="app-title">Membership Portal</h1>
+    </div>
+    <span class="header-spacer"></span>
+    <button id="theme-toggle" type="button" class="btn-header" aria-pressed="false">Dark theme</button>
+    <button id="about-btn" type="button" class="btn-header" aria-expanded="false" aria-controls="about-panel">About</button>
+    <div id="header-user" class="header-user" hidden>
+      <span>Signed in as <strong id="who"></strong></span>
+      <button id="logout-btn" class="btn-header" type="button">Sign out</button>
+    </div>
+  </div>
+  <nav id="app-nav" class="header-nav" aria-label="Primary" hidden>
+    <button id="tab-member" class="active" type="button" aria-current="page">My Portal</button>
+    <button id="tab-admin" type="button" hidden>Admin</button>
+  </nav>
+</header>
+
+<main id="main">
+<div id="about-panel" class="about-panel" hidden>
+  <h2 id="about-name"></h2>
+  <div id="about-body"></div>
+</div>
+
+<!-- ============ SIGN IN ============ -->
+<div id="auth-view">
+  <section class="auth-card">
+    <h2>Sign in</h2>
+    <form id="request-code-form">
+      <label for="login-email">Email</label>
+      <input id="login-email" type="email" autocomplete="email" required>
+      <button type="submit">Email me a code</button>
+    </form>
+    <div id="verify-section" hidden>
+      <form id="verify-code-form">
+        <label for="login-code">Verification code</label>
+        <input id="login-code" inputmode="numeric" autocomplete="one-time-code">
+        <button type="submit">Verify &amp; sign in</button>
+      </form>
+    </div>
+    <p id="login-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+</div>
+
+<div id="app-view" hidden>
+
+  <!-- ============ MEMBER / PERSON VIEW ============ -->
+  <div id="member-view">
+
+    <!-- 1. metric cards  2. charts  (hidden until the profile is complete) -->
+    <div class="member-dash">
+      <div class="metrics" id="member-metrics" aria-label="My summary"></div>
+      <div class="charts" id="member-charts">
+        <div class="card">
+          <h2>My hours by event</h2>
+          <div class="chart-box" id="chart-my-hours-box">
+            <canvas id="chart-my-hours" role="img" aria-label="Bar chart of my volunteer hours by event"></canvas>
+          </div>
+          <p class="chart-empty" id="chart-my-hours-empty" hidden>No hours logged yet.</p>
+          <div id="chart-my-hours-data" class="sr-only"></div>
+        </div>
+        <div class="card">
+          <h2>Hours split</h2>
+          <div class="chart-box" id="chart-my-split-box">
+            <canvas id="chart-my-split" role="img" aria-label="Doughnut chart of event hours versus travel hours"></canvas>
+          </div>
+          <p class="chart-empty" id="chart-my-split-empty" hidden>No hours logged yet.</p>
+          <div id="chart-my-split-data" class="sr-only"></div>
+        </div>
+      </div>
+    </div>
+
+    <section id="membership-panel" hidden>
+      <h2>Membership</h2>
+      <p class="meta-line">Status: <span id="status-badge" class="pill"></span></p>
+      <p class="meta-line">Type: <span id="type-badge" class="pill"></span></p>
+      <p class="meta-line" id="renewal-line" hidden>Next renewal date:
+        <strong><span id="renewal-date"></span></strong></p>
+      <p class="meta-line">Tier: <span id="tier-badge" class="pill"></span></p>
+      <p class="meta-line" id="shirt-sent-line" hidden>Date shirt sent:
+        <strong><span id="shirt-sent-date"></span></strong></p>
+    </section>
+
+    <section id="sec-nonmember" hidden>
+      <p class="notice">You're signed in. Add your first name, last name, and phone
+        in My profile below (then Save) to log volunteer hours and mark attendance.
+        You aren't a member yet — an administrator can add a membership to your account.</p>
+    </section>
+    <!-- kept for app.js compatibility (hide/show by id) -->
+    <span id="nonmember-note" hidden></span>
+
+    <section id="sec-events">
+      <h2>Events</h2>
+      <div id="events-list"></div>
+    </section>
+
+    <section id="sec-profile">
+      <div class="profile-head">
+        <h2 id="profile-name">My profile</h2>
+        <button id="profile-toggle" type="button" class="secondary small" hidden>View profile</button>
+      </div>
+      <form id="profile-form">
+        <label for="f_email">Email (read-only)</label>
+        <input id="f_email" type="email" readonly>
+        <div class="grid">
+          <div><label for="f_first_name">First name <span class="req" aria-hidden="true">*</span></label><input id="f_first_name" type="text" aria-required="true"></div>
+          <div><label for="f_last_name">Last name <span class="req" aria-hidden="true">*</span></label><input id="f_last_name" type="text" aria-required="true"></div>
+          <div><label for="f_phone">Phone <span class="req" aria-hidden="true">*</span></label>
+            <input id="f_phone" type="tel" autocomplete="tel" placeholder="xxx-xxx-xxxx" aria-required="true"></div>
+          <div><label for="f_shirt_size">Shirt size</label>
+            <select id="f_shirt_size">
+              <option value="">-- select --</option>
+              <option>XS</option><option>S</option><option>M</option><option>L</option>
+              <option>XL</option><option>XXL</option><option>XXXL</option>
+            </select></div>
+          <div><label for="f_address_line1">Address line 1</label><input id="f_address_line1" type="text"></div>
+          <div><label for="f_address_line2">Address line 2</label><input id="f_address_line2" type="text"></div>
+          <div><label for="f_city">City</label><input id="f_city" type="text"></div>
+          <div><label for="f_state">State</label><input id="f_state" type="text"></div>
+          <div><label for="f_postal_code">Postal code</label><input id="f_postal_code" type="text"></div>
+        </div>
+        <button type="submit">Save profile</button>
+        <p id="profile-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section id="sec-log">
+      <h2>Log volunteer hours</h2>
+      <form id="hours-form">
+        <label for="event-select">Event</label>
+        <select id="event-select"></select>
+        <div class="grid3">
+          <div><label for="hours-input">Event hours (0-24)</label>
+            <input id="hours-input" type="number" step="0.25" min="0" max="24"></div>
+          <div><label for="travel-input">Travel hours (0-24)</label>
+            <input id="travel-input" type="number" step="0.25" min="0" max="24"></div>
+          <div><label>Total</label><div class="readonly"><span id="total-preview">0</span></div></div>
+        </div>
+        <label for="hours-notes">Notes</label>
+        <textarea id="hours-notes" rows="2"></textarea>
+        <button type="submit">Log hours</button>
+        <p id="hours-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <h2 style="margin-top:1.25rem">My logged hours</h2>
+      <div class="table-tools">
+        <label class="sr-only" for="hours-search">Search my logged hours</label>
+        <input id="hours-search" type="search" placeholder="Search events or notes...">
+        <div class="filters" id="hours-filters" role="group" aria-label="Filter my logged hours"></div>
+        <p class="count-line" id="hours-count" aria-live="polite"></p>
+      </div>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="My logged hours table">
+        <table>
+          <caption class="sr-only">My logged volunteer hours</caption>
+          <thead><tr><th scope="col">Event</th><th scope="col">Event hrs</th><th scope="col">Travel</th>
+            <th scope="col">Total</th><th scope="col">Notes</th></tr></thead>
+          <tbody id="hours-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ ADMIN VIEW ============ -->
+  <div id="admin-view" hidden>
+
+    <!-- 1. metric cards -->
+    <div class="metrics" id="admin-metrics" aria-label="Organization summary"></div>
+
+    <!-- 2. charts (2-column) -->
+    <div class="charts" id="admin-charts">
+      <div class="card">
+        <h2>People by membership status</h2>
+        <div class="chart-box">
+          <canvas id="chart-status" role="img" aria-label="Doughnut chart of people by membership status"></canvas>
+        </div>
+        <div id="chart-status-data" class="sr-only"></div>
+      </div>
+      <div class="card">
+        <h2>Volunteer hours by event</h2>
+        <div class="chart-box">
+          <canvas id="chart-event-hours" role="img" aria-label="Bar chart of total volunteer hours by event"></canvas>
+        </div>
+        <p class="chart-empty" id="chart-event-hours-empty" hidden>No events yet.</p>
+        <div id="chart-event-hours-data" class="sr-only"></div>
+      </div>
+    </div>
+
+    <!-- 3. tabs + tables -->
+    <div class="tabs" role="tablist" aria-label="Admin sections" id="admin-tabs">
+      <button type="button" role="tab" id="atab-people" aria-controls="apanel-people" aria-selected="true" tabindex="0">People</button>
+      <button type="button" role="tab" id="atab-events" aria-controls="apanel-events" aria-selected="false" tabindex="-1">Events</button>
+      <button type="button" role="tab" id="atab-summary" aria-controls="apanel-summary" aria-selected="false" tabindex="-1">Volunteer hours</button>
+      <button type="button" role="tab" id="atab-log" aria-controls="apanel-log" aria-selected="false" tabindex="-1">Log &amp; manage hours</button>
+    </div>
+
+    <!-- ---- People ---- -->
+    <div role="tabpanel" id="apanel-people" aria-labelledby="atab-people">
+    <section>
+      <h2>People</h2>
+      <p>Everyone who has signed up or been added. Toggle <strong>Is member</strong>
+         on a person to make them a member and fill in membership details.</p>
+      <div class="toolbar">
+        <button id="new-member-btn" type="button">New person</button>
+        <button id="export-members" type="button" class="secondary">Export people</button>
+        <button id="export-hours" type="button" class="secondary">Export hours</button>
+      </div>
+      <div class="toolbar">
+        <button id="download-template" type="button" class="secondary">Download CSV template</button>
+        <label for="import-file" style="margin:0">Import CSV:</label>
+        <input id="import-file" type="file" accept=".csv,text/csv" style="max-width:16rem">
+      </div>
+      <p id="import-status" class="status" role="status" aria-live="polite"></p>
+      <div id="import-log" class="import-log"></div>
+
+      <form id="create-member-form" hidden>
+        <h2>Create person</h2>
+        <p>Linked to their login automatically the first time they sign in with this email.</p>
+        <div class="grid">
+          <div><label for="c_email">Email</label><input id="c_email" type="email"></div>
+          <div><label for="c_first_name">First name</label><input id="c_first_name" type="text"></div>
+          <div><label for="c_last_name">Last name</label><input id="c_last_name" type="text"></div>
+          <div><label for="c_phone">Phone</label><input id="c_phone" type="tel" placeholder="xxx-xxx-xxxx"></div>
+          <div><label class="check"><input id="c_is_member" type="checkbox"> Is member</label></div>
+          <div><label for="c_status">Status</label>
+            <select id="c_status"><option>pending</option><option>active</option>
+              <option>lapsed</option><option>suspended</option></select></div>
+          <div><label for="c_type">Membership type</label>
+            <select id="c_type"><option value="non-recurring">non-recurring</option>
+              <option value="recurring">recurring</option></select></div>
+          <div><label for="c_renewal">Next renewal date</label><input id="c_renewal" type="date"></div>
+          <div><label for="c_tier">Tier</label>
+            <select id="c_tier"><option value="No Shirt">No Shirt</option>
+              <option value="Shirt">Shirt</option><option value="Sponsor">Sponsor</option></select></div>
+          <div><label for="c_shirt_sent">Date shirt sent</label><input id="c_shirt_sent" type="date"></div>
+          <div><label for="c_shirt_size">Shirt size</label>
+            <select id="c_shirt_size"><option value="">-- select --</option>
+              <option>XS</option><option>S</option><option>M</option><option>L</option>
+              <option>XL</option><option>XXL</option><option>XXXL</option></select></div>
+          <div><label for="c_city">City</label><input id="c_city" type="text"></div>
+          <div><label for="c_state">State</label><input id="c_state" type="text"></div>
+          <div><label for="c_postal_code">Postal code</label><input id="c_postal_code" type="text"></div>
+          <div><label class="check"><input id="c_is_admin" type="checkbox"> Administrator</label></div>
+        </div>
+        <button type="submit">Add person</button>
+        <p id="create-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <div class="table-tools">
+        <label class="sr-only" for="member-search">Search people</label>
+        <input id="member-search" type="search" placeholder="Search name, email, phone, city...">
+        <div class="filters" id="members-filters" role="group" aria-label="Filter people"></div>
+        <label class="check" style="margin:0; font-weight:400; font-size:.85rem;">
+          <input id="show-archived" type="checkbox"> Show archived</label>
+        <p class="count-line" id="members-count" aria-live="polite"></p>
+      </div>
+      <p class="flag-note">Select a row to edit. Click a column header to sort. Highlighted rows need attention (lapsed or suspended members).</p>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="People table">
+        <table>
+          <caption class="sr-only">People</caption>
+          <thead id="members-head"><tr>
+            <th scope="col" class="sortable" data-key="email" data-label="Email">Email</th>
+            <th scope="col" class="sortable" data-key="full_name" data-label="Name">Name</th>
+            <th scope="col" class="sortable" data-key="is_member" data-label="Member">Member</th>
+            <th scope="col" class="sortable" data-key="membership_status" data-label="Status">Status</th>
+            <th scope="col" class="sortable" data-key="tier" data-label="Tier">Tier</th>
+            <th scope="col" class="sortable" data-key="total_hours" data-label="Total hrs">Total hrs</th>
+            <th scope="col" class="sortable" data-key="is_admin" data-label="Admin">Admin</th>
+          </tr></thead>
+          <tbody id="members-body"></tbody>
+        </table>
+      </div>
+      <div class="toolbar">
+        <button id="prev-page" type="button" class="secondary small">Previous</button>
+        <button id="next-page" type="button" class="secondary small">Next</button>
+        <span id="page-label" aria-live="polite"></span>
+      </div>
+      <p id="members-status" class="status" role="status" aria-live="polite"></p>
+
+      <form id="edit-form" hidden>
+        <h2>Edit person</h2>
+        <label for="e_email">Email (read-only)</label>
+        <input id="e_email" type="email" readonly>
+        <div class="grid">
+          <div><label for="e_first_name">First name</label><input id="e_first_name" type="text"></div>
+          <div><label for="e_last_name">Last name</label><input id="e_last_name" type="text"></div>
+          <div><label for="e_phone">Phone</label><input id="e_phone" type="tel" placeholder="xxx-xxx-xxxx"></div>
+          <div><label class="check"><input id="e_is_member" type="checkbox"> Is member</label></div>
+          <div><label for="e_membership_status">Status</label>
+            <select id="e_membership_status"><option>pending</option><option>active</option>
+              <option>lapsed</option><option>suspended</option></select></div>
+          <div><label for="e_type">Membership type</label>
+            <select id="e_type"><option value="non-recurring">non-recurring</option>
+              <option value="recurring">recurring</option></select></div>
+          <div><label for="e_renewal">Next renewal date</label><input id="e_renewal" type="date"></div>
+          <div><label for="e_tier">Tier</label>
+            <select id="e_tier"><option value="No Shirt">No Shirt</option>
+              <option value="Shirt">Shirt</option><option value="Sponsor">Sponsor</option></select></div>
+          <div><label for="e_shirt_sent">Date shirt sent</label><input id="e_shirt_sent" type="date"></div>
+          <div><label for="e_shirt_size">Shirt size</label>
+            <select id="e_shirt_size"><option value="">-- select --</option>
+              <option>XS</option><option>S</option><option>M</option><option>L</option>
+              <option>XL</option><option>XXL</option><option>XXXL</option></select></div>
+          <div><label for="e_address_line1">Address line 1</label><input id="e_address_line1" type="text"></div>
+          <div><label for="e_address_line2">Address line 2</label><input id="e_address_line2" type="text"></div>
+          <div><label for="e_city">City</label><input id="e_city" type="text"></div>
+          <div><label for="e_state">State</label><input id="e_state" type="text"></div>
+          <div><label for="e_postal_code">Postal code</label><input id="e_postal_code" type="text"></div>
+        </div>
+        <label class="check"><input id="e_is_admin" type="checkbox"> Administrator</label>
+        <div class="toolbar">
+          <button type="submit">Save person</button>
+          <button id="archive-btn" type="button" class="secondary">Archive</button>
+        </div>
+        <div id="archive-confirm" class="confirm-box" role="alert" hidden>
+          <p>Archive this person? They will be hidden from the People list and logging tools. You can unarchive them later.</p>
+          <div class="toolbar">
+            <button id="archive-confirm-btn" type="button" class="danger small">Yes, archive</button>
+            <button id="archive-cancel-btn" type="button" class="secondary small">Cancel</button>
+          </div>
+        </div>
+
+        <h3>Merge another profile into this one</h3>
+        <label for="merge-search">Search for the duplicate profile</label>
+        <input id="merge-search" type="search" placeholder="Type a name or email...">
+        <div id="merge-results" class="search-results"></div>
+        <div id="merge-confirm" class="confirm-box" role="alert" hidden>
+          <p id="merge-confirm-text"></p>
+          <div class="toolbar">
+            <button id="merge-confirm-btn" type="button" class="danger small">Yes, merge</button>
+            <button id="merge-cancel-btn" type="button" class="secondary small">Cancel</button>
+          </div>
+        </div>
+        <p id="merge-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+    </div>
+
+    <!-- ---- Events ---- -->
+    <div role="tabpanel" id="apanel-events" aria-labelledby="atab-events" hidden>
+    <section>
+      <h2>Create event</h2>
+      <form id="create-event-form">
+        <div class="grid">
+          <div><label for="ev_name">Event name</label><input id="ev_name" type="text" required></div>
+          <div><label for="ev_location">Location</label><input id="ev_location" type="text"></div>
+          <div><label for="ev_start">Start</label><input id="ev_start" type="datetime-local" required></div>
+          <div><label for="ev_end">End</label><input id="ev_end" type="datetime-local"></div>
+        </div>
+        <label for="ev_desc">Description</label>
+        <textarea id="ev_desc" rows="2"></textarea>
+        <button type="submit">Create event</button>
+        <p id="events-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+    <section>
+      <h2>Existing events</h2>
+      <div class="table-tools">
+        <label class="sr-only" for="events-search">Search events</label>
+        <input id="events-search" type="search" placeholder="Search events or locations...">
+        <div class="filters" id="events-filters" role="group" aria-label="Filter events"></div>
+        <p class="count-line" id="events-count" aria-live="polite"></p>
+      </div>
+      <p class="flag-note">Select a row to edit.</p>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="Events table">
+        <table>
+          <caption class="sr-only">Existing events</caption>
+          <thead><tr><th scope="col">Name</th><th scope="col">Start</th><th scope="col">End</th><th scope="col">Location</th></tr></thead>
+          <tbody id="events-body"></tbody>
+        </table>
+      </div>
+      <form id="edit-event-form" hidden>
+        <h2 style="margin-top:1rem">Edit event</h2>
+        <div class="grid">
+          <div><label for="ee_name">Event name</label><input id="ee_name" type="text"></div>
+          <div><label for="ee_location">Location</label><input id="ee_location" type="text"></div>
+          <div><label for="ee_start">Start</label><input id="ee_start" type="datetime-local"></div>
+          <div><label for="ee_end">End</label><input id="ee_end" type="datetime-local"></div>
+        </div>
+        <label for="ee_desc">Description</label>
+        <textarea id="ee_desc" rows="2"></textarea>
+        <div class="toolbar">
+          <button type="submit">Save event</button>
+          <button id="cancel-edit-event" type="button" class="secondary">Cancel</button>
+        </div>
+        <p id="edit-event-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+    </div>
+
+    <!-- ---- Volunteer hours summary ---- -->
+    <div role="tabpanel" id="apanel-summary" aria-labelledby="atab-summary" hidden>
+    <section>
+      <h2>Volunteer hours by event</h2>
+      <div class="table-tools">
+        <label class="sr-only" for="summary-search">Search event summary</label>
+        <input id="summary-search" type="search" placeholder="Search events or locations...">
+        <div class="filters" id="summary-filters" role="group" aria-label="Filter event summary"></div>
+        <p class="count-line" id="summary-count" aria-live="polite"></p>
+      </div>
+      <p class="flag-note">Highlighted rows need attention (people attended but no hours were logged).</p>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="Volunteer hours by event table">
+        <table>
+          <caption class="sr-only">Volunteer hours by event</caption>
+          <thead><tr><th scope="col">Event</th><th scope="col">Start</th><th scope="col">Location</th>
+            <th scope="col">RSVP</th><th scope="col">Attended</th><th scope="col">Logged</th><th scope="col">Total hours</th></tr></thead>
+          <tbody id="summary-body"></tbody>
+        </table>
+      </div>
+      <p id="summary-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+    </div>
+
+    <!-- ---- Log & manage hours ---- -->
+    <div role="tabpanel" id="apanel-log" aria-labelledby="atab-log" hidden>
+    <section>
+      <h2>Log hours for a person</h2>
+      <form id="log-form">
+        <label for="log-member-select">Person</label>
+        <select id="log-member-select"></select>
+        <label for="log-event-select">Event</label>
+        <select id="log-event-select"></select>
+        <div class="grid3">
+          <div><label for="log-hours-input">Event hours (0-24)</label>
+            <input id="log-hours-input" type="number" step="0.25" min="0" max="24"></div>
+          <div><label for="log-travel-input">Travel hours (0-24)</label>
+            <input id="log-travel-input" type="number" step="0.25" min="0" max="24"></div>
+          <div><label>Total</label><div class="readonly"><span id="log-total-preview">0</span></div></div>
+        </div>
+        <label for="log-notes-input">Notes</label>
+        <input id="log-notes-input" type="text">
+        <button type="submit">Save hours</button>
+        <p id="log-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section>
+      <h2>Bulk log hours</h2>
+      <form id="bulk-form">
+        <label for="bulk-event-select">Event</label>
+        <select id="bulk-event-select"></select>
+        <label for="bulk-search">Add person (search)</label>
+        <input id="bulk-search" type="search" placeholder="Type a name or email...">
+        <div id="bulk-search-results" class="search-results"></div>
+        <div class="table-wrap" role="region" tabindex="0" aria-label="Bulk hours entry table" style="margin-top:.6rem">
+          <table>
+            <caption class="sr-only">People to log hours for</caption>
+            <thead><tr><th scope="col">Name</th><th scope="col">Event hrs</th>
+              <th scope="col">Travel</th><th scope="col">Notes</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+            <tbody id="bulk-body"></tbody>
+          </table>
+        </div>
+        <button type="submit">Submit entered rows</button>
+        <p id="bulk-status" class="status" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+
+    <section>
+      <h2>Manage hours entries</h2>
+      <form id="manage-form">
+        <label for="manage-event-select">Event</label>
+        <select id="manage-event-select"></select>
+        <button type="submit">Load entries</button>
+      </form>
+      <div class="table-tools">
+        <label class="sr-only" for="manage-search">Search loaded entries</label>
+        <input id="manage-search" type="search" placeholder="Search name or email...">
+        <div class="filters" id="manage-filters" role="group" aria-label="Filter entries"></div>
+        <p class="count-line" id="manage-count" aria-live="polite"></p>
+      </div>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="Hours entries table">
+        <table>
+          <caption class="sr-only">Hours entries for the selected event</caption>
+          <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Event hrs</th>
+            <th scope="col">Travel</th><th scope="col">Total</th><th scope="col">Notes</th><th scope="col">Actions</th></tr></thead>
+          <tbody id="manage-body"></tbody>
+        </table>
+      </div>
+      <p id="manage-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+    </div>
+  </div>
+</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
+<script src="env.js"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

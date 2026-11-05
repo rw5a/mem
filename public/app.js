@@ -1,0 +1,1470 @@
+// app.js - Single-portal logic (person/member view + admin console).
+"use strict";
+
+const MAX_RENDER_ROWS = 500;
+const MAX_ROWS   = 5000;
+const PAGE_SIZE  = 25;
+const MAX_IMPORT = 5000;
+
+let me = null;
+let myMemberId = null;
+let attendanceMap = {};
+let rsvpMap = {};
+let adminLoaded = false;
+
+let selectedMemberId = null;
+let selectedEventId  = null;
+let allMembers = [];
+let viewMembers = [];
+let eventsCache = [];
+let bulkRows = [];
+let memberFilter = "all";
+let summaryRows = [];
+const memberStats = { rows: [], upcoming: 0 };
+const charts = {};
+let pageIndex = 0, searchTerm = "", sortKey = "full_name", sortDir = "asc", showArchived = false;
+
+// ---- Shared helpers ------------------------------------------------
+function $(id) { return document.getElementById(id); }
+function setStatus(id, message, isError) {
+    const el = $(id);
+    if (!el) { return; }
+    el.textContent = message || "";
+    el.className = isError ? "status error" : "status ok";
+}
+function show(id) { const el = $(id); if (el) { el.hidden = false; } }
+function hide(id) { const el = $(id); if (el) { el.hidden = true; } }
+function addCell(row, text) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    row.appendChild(td);
+}
+function fmtDT(s) {
+    if (!s) { return "\u2014"; }
+    const d = new Date(s);
+    if (isNaN(d.getTime())) { return s; }
+    return d.toLocaleString(undefined,
+        { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+function toLocalInput(iso) {
+    if (!iso) { return ""; }
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) { return ""; }
+    const pad = function (n) { return String(n).padStart(2, "0"); };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+        + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+function formatPhone(value) {
+    const d = (value || "").replace(/\D/g, "").slice(0, 10);
+    if (d.length <= 3) { return d; }
+    if (d.length <= 6) { return d.slice(0, 3) + "-" + d.slice(3); }
+    return d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6);
+}
+function onPhoneInput(e) { e.target.value = formatPhone(e.target.value); }
+function syncRenewal(typeId, renewalId) {
+    const type = $(typeId).value, renewal = $(renewalId);
+    if (type === "non-recurring") { renewal.value = ""; renewal.disabled = true; }
+    else { renewal.disabled = false; }
+}
+function syncShirtDate(tierId, dateId) {
+    const tier = $(tierId).value, date = $(dateId);
+    if (tier === "No Shirt") { date.value = ""; date.disabled = true; }
+    else { date.disabled = false; }
+}
+
+// ---- Login + single entry ------------------------------------------
+async function onRequestCode(event) {
+    event.preventDefault();
+    try {
+        await requestLoginCode($("login-email").value.trim());
+        show("verify-section");
+        setStatus("login-status", "Check your email for a 6-digit code.", false);
+    } catch (err) { setStatus("login-status", err.message, true); }
+}
+async function onVerifyCode(event) {
+    event.preventDefault();
+    try {
+        await verifyLoginCode($("login-email").value.trim(), $("login-code").value.trim());
+        await enterApp();
+    } catch (err) { setStatus("login-status", err.message, true); }
+}
+async function enterApp() {
+    let profile;
+    try { profile = await getMyProfile(); }
+    catch (err) { setStatus("login-status", err.message, true); return; }
+    if (!profile) {
+        // Brief window right after first signup before the row is visible.
+        await new Promise(function (r) { setTimeout(r, 1200); });
+        try { profile = await getMyProfile(); } catch (err) { /* fall through */ }
+    }
+    if (!profile) {
+        setStatus("login-status",
+            "Your account is being set up — please sign in again in a moment.", true);
+        return;
+    }
+    me = profile; myMemberId = me.id;
+    hide("auth-view"); show("app-view"); show("app-nav"); show("header-user");
+    $("who").textContent = me.full_name || me.email;
+    if (me.is_admin) { show("tab-admin"); } else { hide("tab-admin"); }
+    fillMemberProfile(me);
+    showMemberView();
+    await Promise.all([loadMemberEvents(), loadHours()]);
+    renderMemberDash();
+}
+function showMemberView() {
+    show("member-view"); hide("admin-view");
+    $("tab-member").classList.add("active");
+    $("tab-admin").classList.remove("active");
+    $("tab-member").setAttribute("aria-current", "page");
+    $("tab-admin").removeAttribute("aria-current");
+    renderMemberDash();
+}
+async function showAdminView() {
+    if (!me || !me.is_admin) { return; }
+    hide("member-view"); show("admin-view");
+    $("tab-admin").classList.add("active");
+    $("tab-member").classList.remove("active");
+    $("tab-admin").setAttribute("aria-current", "page");
+    $("tab-member").removeAttribute("aria-current");
+    if (!adminLoaded) {
+        await loadAdminEvents();
+        await Promise.all([loadMembers(), loadSummary(), loadTools()]);
+        adminLoaded = true;
+    }
+    renderAdminDash();
+}
+// ---- Org branding + About panel (driven by ORG in config.js) -------
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+}
+function initOrg() {
+    if (typeof ORG === "undefined") { return; }
+    if (ORG.name) { $("org-name").textContent = ORG.name; }
+    if (ORG.logo_url) {
+        const img = $("org-logo");
+        img.src = ORG.logo_url; img.alt = (ORG.name || "Logo");
+        img.hidden = false;
+    }
+    $("about-name").textContent = ORG.name || "About";
+    const rows = [];
+    if (ORG.address) { rows.push("<div class='about-row'>" + escapeHtml(ORG.address) + "</div>"); }
+    if (ORG.phone) {
+        rows.push("<div class='about-row'>Phone: <a href='tel:" + escapeHtml(ORG.phone.replace(/[^\d+]/g, ""))
+            + "'>" + escapeHtml(ORG.phone) + "</a></div>");
+    }
+    if (ORG.email) {
+        rows.push("<div class='about-row'>Email: <a href='mailto:" + escapeHtml(ORG.email)
+            + "'>" + escapeHtml(ORG.email) + "</a></div>");
+    }
+    if (ORG.website) {
+        const safe = escapeHtml(ORG.website);
+        rows.push("<div class='about-row'>Web: <a href='" + safe + "' target='_blank' rel='noopener'>"
+            + safe + "</a></div>");
+    }
+    $("about-body").innerHTML = rows.join("");
+    $("about-btn").addEventListener("click", function () {
+        const p = $("about-panel"); p.hidden = !p.hidden;
+        $("about-btn").setAttribute("aria-expanded", String(!p.hidden));
+    });
+}
+function onLogout() { logout(); window.location.reload(); }
+
+// =====================================================================
+// PERSON / MEMBER VIEW
+// =====================================================================
+// Map each membership value to a semantic pill variant (color = meaning).
+function statusVariant(s) {
+    return { active: "success", pending: "neutral", lapsed: "warning", suspended: "danger" }[s] || "neutral";
+}
+function typeVariant(t) { return t === "recurring" ? "info" : "neutral"; }
+function tierVariant(t) {
+    return { "No Shirt": "neutral", "Shirt": "info", "Sponsor": "success" }[t] || "neutral";
+}
+// Show a fresh/incomplete profile first (hiding events + hour logging via
+// the .needs-profile CSS) until first name, last name, and phone are saved.
+function applyProfileGate() {
+    const mv = $("member-view");
+    if (!mv) { return; }
+    const incomplete = !profileComplete(me);
+    mv.classList.toggle("needs-profile", incomplete);
+
+    // Header shows the person's name; read-only email in the form.
+    const nameEl = $("profile-name");
+    if (nameEl) { nameEl.textContent = (me && me.full_name) ? me.full_name : "My profile"; }
+    if ($("f_email")) { $("f_email").value = me ? (me.email || "") : ""; }
+    // Complete profiles collapse to a "View profile" summary; incomplete
+    // ones stay open with no collapse control (they must finish it).
+    const toggle = $("profile-toggle");
+    const form = $("profile-form");
+    if (toggle && form) {
+        toggle.hidden = incomplete;
+        toggle.textContent = "View profile";
+        form.hidden = !incomplete;
+    }
+
+    let hint = $("profile-gate-hint");
+    if (incomplete) {
+        if (!hint) {
+            hint = document.createElement("div");
+            hint.id = "profile-gate-hint";
+            hint.className = "notice";
+            hint.textContent = "Welcome! Complete your profile below and press "
+                + "Save to unlock events and volunteer-hour logging.";
+            mv.insertBefore(hint, mv.firstChild);
+        }
+        hint.hidden = false;
+    } else if (hint) { hint.hidden = true; }
+    renderMemberDash();
+}
+function fillMemberProfile(p) {
+    applyProfileGate();
+    // Membership panel only for actual members; note for non-members.
+    if (p.is_member) {
+        hide("sec-nonmember");
+        show("membership-panel");
+        $("status-badge").textContent = p.membership_status;
+        $("status-badge").className = "pill pill-" + statusVariant(p.membership_status);
+        $("type-badge").textContent = p.membership_type;
+        $("type-badge").className = "pill pill-" + typeVariant(p.membership_type);
+        $("tier-badge").textContent = p.tier;
+        $("tier-badge").className = "pill pill-" + tierVariant(p.tier);
+        if (p.membership_type === "recurring" && p.next_renewal_date) {
+            $("renewal-date").textContent = p.next_renewal_date; show("renewal-line");
+        } else { hide("renewal-line"); }
+        if (p.date_shirt_sent) {
+            $("shirt-sent-date").textContent = p.date_shirt_sent; show("shirt-sent-line");
+        } else { hide("shirt-sent-line"); }
+    } else {
+        hide("membership-panel");
+        show("sec-nonmember");
+    }
+    $("f_first_name").value    = p.first_name    || "";
+    $("f_last_name").value     = p.last_name     || "";
+    $("f_phone").value         = p.phone         || "";
+    $("f_address_line1").value = p.address_line1 || "";
+    $("f_address_line2").value = p.address_line2 || "";
+    $("f_city").value          = p.city          || "";
+    $("f_state").value         = p.state         || "";
+    $("f_postal_code").value   = p.postal_code   || "";
+    $("f_shirt_size").value    = p.shirt_size    || "";
+}
+async function onSaveProfile(event) {
+    event.preventDefault();
+    const profile = {
+        first_name: $("f_first_name").value.trim(), last_name: $("f_last_name").value.trim(),
+        phone: $("f_phone").value.trim(), address_line1: $("f_address_line1").value.trim(),
+        address_line2: $("f_address_line2").value.trim(), city: $("f_city").value.trim(),
+        state: $("f_state").value.trim(), postal_code: $("f_postal_code").value.trim(),
+        shirt_size: $("f_shirt_size").value
+    };
+    try {
+        me = await updateMyProfile(profile);
+        $("who").textContent = me.full_name || me.email;
+        setStatus("profile-status", "Profile saved.", false);
+        fillMemberProfile(me);      // re-run the gate: reveal events + hours once complete
+        await loadMemberEvents();
+    } catch (err) { setStatus("profile-status", err.message, true); }
+}
+async function loadMemberEvents() {
+    try {
+        const events = await listEvents();
+        try {
+            const att = await getMemberAttendance(myMemberId);
+            attendanceMap = {};
+            for (let i = 0; i < att.length; i += 1) { attendanceMap[att[i].event_id] = att[i].attended; }
+            const rs = await getMemberRsvp(myMemberId);
+            rsvpMap = {};
+            for (let i = 0; i < rs.length; i += 1) { rsvpMap[rs[i].event_id] = rs[i].rsvp; }
+        } catch (err) { /* best-effort */ }
+        const now = Date.now();
+        const upcoming = [], past = [];
+        const limit = Math.min(events.length, MAX_RENDER_ROWS);
+        for (let i = 0; i < limit; i += 1) {
+            const t = new Date(events[i].start_at).getTime();
+            if (!isNaN(t) && t >= now) { upcoming.push(events[i]); } else { past.push(events[i]); }
+        }
+        past.reverse();
+        memberStats.upcoming = upcoming.length;
+        const list = $("events-list"); list.innerHTML = "";
+        renderEventGroup(list, "Upcoming", upcoming, true);
+        renderPastDropdown(list, past, false);
+        const select = $("event-select"); select.innerHTML = "";
+        const ordered = upcoming.concat(past);
+        for (let i = 0; i < ordered.length; i += 1) {
+            const opt = document.createElement("option");
+            opt.value = ordered[i].id;
+            opt.textContent = ordered[i].name + " (" + fmtDT(ordered[i].start_at) + ")";
+            select.appendChild(opt);
+        }
+    } catch (err) { setStatus("hours-status", err.message, true); }
+    renderMemberDash();
+}
+function renderEventGroup(container, heading, events) {
+    if (events.length === 0) { return; }
+    if (heading) {
+        const h = document.createElement("h3"); h.textContent = heading; container.appendChild(h);
+    }
+    const n = Math.min(events.length, MAX_RENDER_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const ev = events[i];
+        const card = document.createElement("div"); card.className = "event-card";
+        const title = document.createElement("div");
+        title.textContent = ev.name; title.className = "event-title"; card.appendChild(title);
+        const meta = document.createElement("div"); meta.className = "event-meta";
+        meta.textContent = fmtDT(ev.start_at) + " \u2192 " + fmtDT(ev.end_at)
+            + "  \u00b7  " + (ev.location || "\u2014");
+        card.appendChild(meta);
+        if (ev.description) {
+            const d = document.createElement("div"); d.className = "event-meta";
+            d.textContent = ev.description; card.appendChild(d);
+        }
+        const wrap = document.createElement("label"); wrap.className = "attend";
+        const cb = document.createElement("input"); cb.type = "checkbox";
+        cb.checked = !!attendanceMap[ev.id];
+        cb.addEventListener("change", function () { onToggleAttendance(ev.id, cb); });
+        const span = document.createElement("span"); span.textContent = "I attended this event";
+        wrap.appendChild(cb); wrap.appendChild(span); card.appendChild(wrap);
+        if (!profileComplete(me)) {
+            const hint = document.createElement("div");
+            hint.className = "event-meta hint-warn";
+            hint.textContent = "Complete your profile to log hours or attendance.";
+            card.appendChild(hint);
+        }
+        container.appendChild(card);
+    }
+}
+function renderPastDropdown(container, events, upcoming) {
+    if (events.length === 0) { return; }
+    const h = document.createElement("h3"); h.textContent = "Past"; container.appendChild(h);
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Past events");
+    const blank = document.createElement("option");
+    blank.value = ""; blank.textContent = "-- select a past event to view --";
+    select.appendChild(blank);
+    const n = Math.min(events.length, MAX_RENDER_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const opt = document.createElement("option");
+        opt.value = events[i].id;
+        opt.textContent = events[i].name + " (" + fmtDT(events[i].start_at) + ")";
+        select.appendChild(opt);
+    }
+    container.appendChild(select);
+    const detail = document.createElement("div"); detail.style.marginTop = ".5rem";
+    container.appendChild(detail);
+    select.addEventListener("change", function () {
+        detail.innerHTML = "";
+        if (!select.value) { return; }
+        const ev = events.find(function (e) { return e.id === select.value; });
+        if (ev) { renderEventGroup(detail, null, [ev], upcoming); }
+    });
+}
+async function onToggleRsvp(eventId, checkbox) {
+    const desired = checkbox.checked;
+    try { await setMyRsvp(eventId, desired); rsvpMap[eventId] = desired; }
+    catch (err) { checkbox.checked = !desired; setStatus("hours-status", err.message, true); }
+}
+async function onToggleAttendance(eventId, checkbox) {
+    const desired = checkbox.checked;
+    if (!profileComplete(me)) {
+        checkbox.checked = !desired;
+        setStatus("hours-status",
+            "Add your first name, last name, and phone in My profile (then Save) before marking attendance.",
+            true);
+        return;
+    }
+    try { await setMyAttendance(eventId, desired); attendanceMap[eventId] = desired; }
+    catch (err) { checkbox.checked = !desired; setStatus("hours-status", err.message, true); }
+}
+function updateTotalPreview() {
+    const h = Number($("hours-input").value) || 0;
+    const t = Number($("travel-input").value) || 0;
+    $("total-preview").textContent = String(h + t);
+}
+function profileComplete(p) {
+    if (!p) { return false; }
+    const digits = (p.phone || "").replace(/\D/g, "");
+    return !!(p.first_name && p.first_name.trim()
+        && p.last_name && p.last_name.trim() && digits.length === 10);
+}
+function requireCompleteProfile(statusId, action) {
+    if (profileComplete(me)) { return true; }
+    setStatus(statusId,
+        "Add your first name, last name, and phone in My profile (then Save) before "
+            + action + ".", true);
+    return false;
+}
+async function onLogHours(event) {
+    event.preventDefault();
+    if (!requireCompleteProfile("hours-status", "logging hours")) { return; }
+    const eventId = $("event-select").value;
+    const hours = Number($("hours-input").value);
+    const travel = Number($("travel-input").value || 0);
+    const notes = $("hours-notes").value.trim();
+    if (!(hours > 0 && hours <= 24)) { setStatus("hours-status", "Event hours must be between 0 and 24.", true); return; }
+    if (travel < 0 || travel > 24) { setStatus("hours-status", "Travel hours must be between 0 and 24.", true); return; }
+    try {
+        await logVolunteerHours(eventId, hours, travel, notes);
+        setStatus("hours-status", "Hours logged.", false);
+        await loadHours();
+    } catch (err) { setStatus("hours-status", err.message, true); }
+}
+async function loadHours() {
+    if (!myMemberId) { return; }
+    try {
+        const rows = await getMemberVolunteerHours(myMemberId);
+        const tbody = $("hours-body"); tbody.innerHTML = "";
+        memberStats.rows = rows;
+        const limit = Math.min(rows.length, MAX_RENDER_ROWS);
+        for (let i = 0; i < limit; i += 1) {
+            const r = rows[i];
+            const tr = document.createElement("tr");
+            tr.dataset.travel = String(Number(r.travel_time) > 0 ? 1 : 0);
+            tr.dataset.notes = r.notes ? "1" : "0";
+            addCell(tr, r.events ? r.events.name : "");
+            addCell(tr, String(r.hours));
+            addCell(tr, String(r.travel_time));
+            addCell(tr, String(r.total_hours));
+            addCell(tr, r.notes || "");
+            tbody.appendChild(tr);
+        }
+        tfRefresh("hours");
+        renderMemberDash();
+    } catch (err) { setStatus("hours-status", err.message, true); }
+}
+
+// =====================================================================
+// ADMIN VIEW
+// =====================================================================
+async function loadMembers() {
+    try { allMembers = await adminFetchAllMembers(); applyView(); renderAdminDash(); }
+    catch (err) { setStatus("members-status", err.message, true); }
+}
+function applyView() {
+    const term = searchTerm.trim().toLowerCase();
+    viewMembers = allMembers.filter(function (m) {
+        if (!showArchived && m.archived) { return false; }   // hide archived by default
+        if (!MEMBER_FILTERS[memberFilter].test(m)) { return false; }
+        if (!term) { return true; }
+        const hay = [m.email, m.full_name, m.phone, m.city, m.state,
+            m.membership_status, m.tier].join(" ").toLowerCase();
+        return hay.indexOf(term) >= 0;
+    });
+    const dir = sortDir === "desc" ? -1 : 1;
+    viewMembers.sort(function (a, b) {
+        let av = a[sortKey], bv = b[sortKey];
+        if (sortKey === "total_hours") { return ((Number(av) || 0) - (Number(bv) || 0)) * dir; }
+        if (sortKey === "is_member" || sortKey === "is_admin") {
+            return ((av ? 1 : 0) - (bv ? 1 : 0)) * dir;
+        }
+        av = (av === null || av === undefined) ? "" : String(av).toLowerCase();
+        bv = (bv === null || bv === undefined) ? "" : String(bv).toLowerCase();
+        if (av < bv) { return -1 * dir; }
+        if (av > bv) { return 1 * dir; }
+        return 0;
+    });
+    const pages = Math.max(1, Math.ceil(viewMembers.length / PAGE_SIZE));
+    if (pageIndex > pages - 1) { pageIndex = pages - 1; }
+    if (pageIndex < 0) { pageIndex = 0; }
+    renderMembers(); renderPager(); updateSortIndicators(); renderMemberFilters();
+}
+function needsAttention(m) {
+    return !!m.is_member && (m.membership_status === "lapsed" || m.membership_status === "suspended");
+}
+const MEMBER_FILTERS = {
+    all:       { label: "All",             test: function () { return true; } },
+    members:   { label: "Members",         test: function (m) { return !!m.is_member; } },
+    nonmember: { label: "Non-members",     test: function (m) { return !m.is_member; } },
+    active:    { label: "Active",          test: function (m) { return !!m.is_member && m.membership_status === "active"; } },
+    attention: { label: "Needs attention", test: needsAttention }
+};
+function renderMemberFilters() {
+    const host = $("members-filters");
+    if (!host) { return; }
+    const base = allMembers.filter(function (m) { return showArchived || !m.archived; });
+    host.innerHTML = "";
+    Object.keys(MEMBER_FILTERS).forEach(function (key) {
+        const f = MEMBER_FILTERS[key];
+        const n = base.filter(f.test).length;
+        const b = document.createElement("button");
+        b.type = "button"; b.textContent = f.label + " (" + n + ")";
+        b.setAttribute("aria-pressed", String(memberFilter === key));
+        b.addEventListener("click", function () { memberFilter = key; pageIndex = 0; applyView(); });
+        host.appendChild(b);
+    });
+    $("members-count").textContent = viewMembers.length + " of " + base.length + " shown";
+}
+function addBadge(row, text, variant) {
+    const td = document.createElement("td");
+    const sp = document.createElement("span");
+    sp.className = "pill pill-" + variant; sp.textContent = text;
+    td.appendChild(sp); row.appendChild(td);
+}
+function renderMembers() {
+    const tbody = $("members-body"); tbody.innerHTML = "";
+    const start = pageIndex * PAGE_SIZE;
+    const end = Math.min(start + PAGE_SIZE, viewMembers.length, start + MAX_ROWS);
+    for (let i = start; i < end; i += 1) {
+        const m = viewMembers[i];
+        const tr = document.createElement("tr"); tr.className = "clickable";
+        tr.tabIndex = 0;
+        if (needsAttention(m)) { tr.classList.add("flag"); }
+        addCell(tr, m.email);
+        addCell(tr, m.full_name || "");
+        addCell(tr, m.is_member ? "yes" : "no");
+        if (m.is_member) { addBadge(tr, m.membership_status, statusVariant(m.membership_status)); }
+        else { addCell(tr, "\u2014"); }
+        if (m.is_member) { addBadge(tr, m.tier, tierVariant(m.tier)); } else { addCell(tr, "\u2014"); }
+        addCell(tr, String(m.total_hours));
+        addCell(tr, m.is_admin ? "yes" : "no");
+        tr.addEventListener("click", function () { selectMember(m); });
+        tr.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMember(m); }
+        });
+        tbody.appendChild(tr);
+    }
+}
+function renderPager() {
+    const pages = Math.max(1, Math.ceil(viewMembers.length / PAGE_SIZE));
+    $("page-label").textContent = "Page " + (pageIndex + 1) + " of " + pages
+        + " (" + viewMembers.length + " shown)";
+    $("prev-page").disabled = pageIndex <= 0;
+    $("next-page").disabled = pageIndex >= pages - 1;
+}
+function onPrevPage() { if (pageIndex > 0) { pageIndex -= 1; renderMembers(); renderPager(); } }
+function onNextPage() {
+    const pages = Math.ceil(viewMembers.length / PAGE_SIZE);
+    if (pageIndex < pages - 1) { pageIndex += 1; renderMembers(); renderPager(); }
+}
+function onSearch(e) { searchTerm = e.target.value; pageIndex = 0; applyView(); }
+function onSortHeader(e) {
+    const key = e.currentTarget.dataset.key;
+    if (!key) { return; }
+    if (sortKey === key) { sortDir = sortDir === "asc" ? "desc" : "asc"; }
+    else { sortKey = key; sortDir = "asc"; }
+    pageIndex = 0; applyView();
+}
+function updateSortIndicators() {
+    const heads = document.querySelectorAll("#members-head th.sortable");
+    for (let i = 0; i < heads.length; i += 1) {
+        const th = heads[i], base = th.dataset.label;
+        th.textContent = (th.dataset.key === sortKey)
+            ? base + (sortDir === "asc" ? " \u25B2" : " \u25BC") : base;
+    }
+}
+
+// ---- Create person/member ------------------------------------------
+function toggleCreateMember() {
+    const el = $("create-member-form");
+    el.hidden = !el.hidden;
+    hide("edit-form");
+    syncRenewal("c_type", "c_renewal");
+    syncShirtDate("c_tier", "c_shirt_sent");
+}
+async function onCreateMember(event) {
+    event.preventDefault();
+    const type = $("c_type").value, tier = $("c_tier").value;
+    const fields = {
+        email: $("c_email").value.trim(), first_name: $("c_first_name").value.trim(),
+        last_name: $("c_last_name").value.trim(), phone: $("c_phone").value.trim(),
+        is_member: $("c_is_member").checked,
+        membership_status: $("c_status").value, membership_type: type,
+        next_renewal_date: type === "recurring" ? ($("c_renewal").value || null) : null,
+        tier: tier, date_shirt_sent: tier !== "No Shirt" ? ($("c_shirt_sent").value || null) : null,
+        shirt_size: $("c_shirt_size").value, city: $("c_city").value.trim(),
+        state: $("c_state").value.trim(), postal_code: $("c_postal_code").value.trim(),
+        is_admin: $("c_is_admin").checked
+    };
+    if (!fields.email || !fields.first_name) {
+        setStatus("create-status", "Email and first name are required.", true); return;
+    }
+    try {
+        await adminCreateMember(fields);
+        setStatus("create-status", "Person created.", false);
+        $("create-member-form").reset();
+        syncRenewal("c_type", "c_renewal"); syncShirtDate("c_tier", "c_shirt_sent");
+        await Promise.all([loadMembers(), loadTools()]);
+    } catch (err) { setStatus("create-status", err.message, true); }
+}
+
+// ---- CSV import ----------------------------------------------------
+const IMPORT_COLS = ["email", "first_name", "last_name", "phone", "is_member",
+    "membership_status", "membership_type", "next_renewal_date", "tier",
+    "date_shirt_sent", "shirt_size", "city", "state", "postal_code", "is_admin"];
+
+function parseCsv(text) {
+    const rows = []; let row = [], field = "", inQuotes = false;
+    for (let i = 0; i < text.length; i += 1) {
+        const c = text[i];
+        if (inQuotes) {
+            if (c === '"') { if (text[i + 1] === '"') { field += '"'; i += 1; } else { inQuotes = false; } }
+            else { field += c; }
+        } else if (c === '"') { inQuotes = true; }
+        else if (c === ",") { row.push(field); field = ""; }
+        else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+        else if (c === "\r") { /* ignore */ }
+        else { field += c; }
+    }
+    if (field !== "" || row.length > 0) { row.push(field); rows.push(row); }
+    return rows;
+}
+function truthy(v) {
+    const s = String(v || "").trim().toLowerCase();
+    return s === "true" || s === "yes" || s === "1" || s === "y";
+}
+function downloadTemplate() {
+    const ex1 = ["jane@example.org", "Jane", "Doe", "555-123-4567", "true", "active", "recurring",
+        "2027-01-15", "Shirt", "2026-03-01", "M", "Springfield", "IL", "62701", "false"];
+    const ex2 = ["sam@example.org", "Sam", "Volunteer", "", "false", "pending", "non-recurring",
+        "", "No Shirt", "", "", "Chicago", "IL", "60601", "false"];
+    const csv = [IMPORT_COLS.join(","), ex1.join(","), ex2.join(",")].join("\r\n");
+    downloadFile("members-template.csv", csv);
+}
+async function onImportFile(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) { return; }
+    setStatus("import-status", "Reading file...", false);
+    $("import-log").textContent = "";
+    let text;
+    try { text = await file.text(); }
+    catch (err) { setStatus("import-status", "Could not read file.", true); return; }
+    const rows = parseCsv(text);
+    if (rows.length < 2) { setStatus("import-status", "File has no data rows.", true); return; }
+    const header = rows[0].map(function (h) { return h.trim().toLowerCase(); });
+    const idx = {};
+    for (let c = 0; c < IMPORT_COLS.length; c += 1) { idx[IMPORT_COLS[c]] = header.indexOf(IMPORT_COLS[c]); }
+    if (idx.email < 0) { setStatus("import-status", "Template must include an 'email' column.", true); return; }
+    let imported = 0, skipped = 0;
+    const errors = [];
+    const limit = Math.min(rows.length, MAX_IMPORT + 1);
+    for (let r = 1; r < limit; r += 1) {
+        const cells = rows[r];
+        if (cells.length === 1 && cells[0].trim() === "") { continue; }
+        const get = function (key) {
+            const at = idx[key];
+            return at >= 0 && at < cells.length ? cells[at].trim() : "";
+        };
+        const fields = {
+            email: get("email"), first_name: get("first_name"), last_name: get("last_name"),
+            phone: get("phone"), is_member: truthy(get("is_member")),
+            membership_status: get("membership_status") || "pending",
+            membership_type: get("membership_type") || "non-recurring",
+            next_renewal_date: get("next_renewal_date") || null, tier: get("tier") || "No Shirt",
+            date_shirt_sent: get("date_shirt_sent") || null, shirt_size: get("shirt_size"),
+            city: get("city"), state: get("state"), postal_code: get("postal_code"),
+            is_admin: truthy(get("is_admin"))
+        };
+        if (!fields.email) { skipped += 1; errors.push("Row " + r + ": missing email"); continue; }
+        try { await adminCreateMember(fields); imported += 1; }
+        catch (err) { skipped += 1; errors.push("Row " + r + " (" + fields.email + "): " + err.message); }
+    }
+    setStatus("import-status", "Imported " + imported + ", skipped " + skipped + ".", skipped > 0);
+    if (errors.length > 0) {
+        const shown = errors.slice(0, 15).join("\n");
+        $("import-log").textContent = shown
+            + (errors.length > 15 ? "\n\u2026 and " + (errors.length - 15) + " more" : "");
+    }
+    event.target.value = "";
+    await Promise.all([loadMembers(), loadTools()]);
+}
+
+// ---- CSV exports ---------------------------------------------------
+function csvCell(value) {
+    const s = (value === null || value === undefined) ? "" : String(value);
+    if (/[",\n]/.test(s)) { return '"' + s.replace(/"/g, '""') + '"'; }
+    return s;
+}
+function rowsToCsv(cols, rows, pick) {
+    const lines = [cols.join(",")];
+    const n = Math.min(rows.length, MAX_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const values = pick(rows[i]); const cells = [];
+        for (let c = 0; c < values.length; c += 1) { cells.push(csvCell(values[c])); }
+        lines.push(cells.join(","));
+    }
+    return lines.join("\r\n");
+}
+function downloadFile(filename, text) {
+    const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+async function onExportMembers() {
+    try {
+        const rows = await adminFetchAllMembers();
+        const cols = ["email", "first_name", "last_name", "phone", "is_member",
+            "membership_status", "membership_type", "next_renewal_date", "tier",
+            "date_shirt_sent", "address_line1", "address_line2", "city", "state",
+            "postal_code", "shirt_size", "total_hours", "is_admin"];
+        downloadFile("members.csv", rowsToCsv(cols, rows, function (m) {
+            return cols.map(function (c) { return m[c]; });
+        }));
+        setStatus("members-status", "Exported " + rows.length + " people.", false);
+    } catch (err) { setStatus("members-status", err.message, true); }
+}
+async function onExportHours() {
+    try {
+        const rows = await adminFetchAllHours();
+        const cols = ["name", "email", "is_member", "event", "event_start",
+            "event_location", "event_hours", "travel_hours", "total_hours", "notes"];
+        downloadFile("hours.csv", rowsToCsv(cols, rows, function (r) {
+            const m = r.members || {}, e = r.events || {};
+            const name = [m.first_name, m.last_name].filter(Boolean).join(" ");
+            return [name, m.email || "", m.is_member ? "yes" : "no", e.name || "",
+                e.start_at || "", e.location || "", r.hours, r.travel_time, r.total_hours, r.notes || ""];
+        }));
+        setStatus("members-status", "Exported " + rows.length + " hour entries.", false);
+    } catch (err) { setStatus("members-status", err.message, true); }
+}
+
+// ---- Person editing ------------------------------------------------
+function selectMember(m) {
+    hide("create-member-form");
+    selectedMemberId = m.id;
+    $("e_email").value             = m.email;
+    $("e_first_name").value        = m.first_name    || "";
+    $("e_last_name").value         = m.last_name     || "";
+    $("e_phone").value             = m.phone         || "";
+    $("e_is_member").checked        = m.is_member;
+    $("e_membership_status").value = m.membership_status;
+    $("e_type").value              = m.membership_type || "non-recurring";
+    $("e_renewal").value           = m.next_renewal_date || "";
+    $("e_tier").value              = m.tier || "No Shirt";
+    $("e_shirt_sent").value        = m.date_shirt_sent || "";
+    $("e_address_line1").value     = m.address_line1 || "";
+    $("e_address_line2").value     = m.address_line2 || "";
+    $("e_city").value              = m.city          || "";
+    $("e_state").value             = m.state         || "";
+    $("e_postal_code").value       = m.postal_code   || "";
+    $("e_shirt_size").value        = m.shirt_size    || "";
+    $("e_is_admin").checked        = m.is_admin;
+    $("archive-btn").textContent = m.archived ? "Unarchive" : "Archive";
+    $("archive-btn").dataset.archived = m.archived ? "1" : "";
+    hide("archive-confirm");
+    if ($("merge-search")) { $("merge-search").value = ""; }
+    if ($("merge-results")) { $("merge-results").innerHTML = ""; }
+    hide("merge-confirm"); mergeSourceId = null;
+    setStatus("merge-status", "", false);
+    syncRenewal("e_type", "e_renewal");
+    syncShirtDate("e_tier", "e_shirt_sent");
+    show("edit-form");
+}
+// Merge: search for the profile to merge INTO the one being edited.
+let mergeSourceId = null;
+function onMergeSearch() {
+    const results = $("merge-results");
+    if (!results) { return; }
+    results.innerHTML = "";
+    hide("merge-confirm"); mergeSourceId = null;
+    const term = ($("merge-search").value || "").trim().toLowerCase();
+    if (!term || !selectedMemberId) { return; }
+    let shown = 0;
+    for (let i = 0; i < allMembers.length && shown < 8; i += 1) {
+        const m = allMembers[i];
+        if (m.id === selectedMemberId) { continue; }    // can't merge into itself
+        const hay = ((m.full_name || "") + " " + m.email).toLowerCase();
+        if (hay.indexOf(term) < 0) { continue; }
+        const div = document.createElement("div");
+        div.textContent = (m.full_name ? m.full_name + " " : "") + "<" + m.email + ">";
+        div.addEventListener("click", function () { onMergeArm(m); });
+        results.appendChild(div);
+        shown += 1;
+    }
+    if (shown === 0) {
+        const div = document.createElement("div");
+        div.textContent = "No match."; div.style.color = "var(--muted)"; div.style.cursor = "default";
+        results.appendChild(div);
+    }
+}
+// Clicking a result arms an inline confirm (no blocking dialog).
+function onMergeArm(source) {
+    if (!selectedMemberId) { return; }
+    mergeSourceId = source.id;
+    const target = allMembers.find(function (x) { return x.id === selectedMemberId; });
+    const tgtName = target ? (target.full_name || target.email) : "this profile";
+    const srcName = source.full_name || source.email;
+    $("merge-results").innerHTML = "";
+    $("merge-confirm-text").textContent = "Merge \u201c" + srcName + "\u201d into \u201c"
+        + tgtName + "\u201d? Their hours and attendance move over, then \u201c" + srcName
+        + "\u201d is deleted. This cannot be undone.";
+    show("merge-confirm");
+}
+async function onMergeConfirm() {
+    if (!selectedMemberId || !mergeSourceId) { return; }
+    try {
+        await adminMergeMembers(selectedMemberId, mergeSourceId);
+        setStatus("merge-status", "Merged in.", false);
+        mergeSourceId = null;
+        $("merge-search").value = ""; $("merge-results").innerHTML = ""; hide("merge-confirm");
+        hide("edit-form"); selectedMemberId = null;
+        await loadMembers(); await loadTools();
+    } catch (err) { setStatus("merge-status", err.message, true); }
+}
+function onMergeCancel() { mergeSourceId = null; hide("merge-confirm"); }
+async function doArchive(next) {
+    if (!selectedMemberId) { return; }
+    try {
+        await adminSetArchived(selectedMemberId, next);
+        setStatus("members-status", next ? "Archived." : "Unarchived.", false);
+        hide("edit-form"); selectedMemberId = null;
+        await loadMembers(); await loadTools();
+    } catch (err) { setStatus("members-status", err.message, true); }
+}
+function onArchiveToggle() {
+    if (!selectedMemberId) { return; }
+    const currentlyArchived = $("archive-btn").dataset.archived === "1";
+    if (currentlyArchived) { doArchive(false); return; }   // unarchive is instant
+    show("archive-confirm");                                 // archiving asks inline first
+}
+function onArchiveCancel() { hide("archive-confirm"); }
+async function onSaveMember(event) {
+    event.preventDefault();
+    if (!selectedMemberId) { return; }
+    const type = $("e_type").value, tier = $("e_tier").value;
+    const fields = {
+        first_name: $("e_first_name").value.trim() || null,
+        last_name: $("e_last_name").value.trim() || null,
+        phone: $("e_phone").value.trim() || null,
+        is_member: $("e_is_member").checked,
+        membership_status: $("e_membership_status").value, membership_type: type,
+        next_renewal_date: type === "recurring" ? ($("e_renewal").value || null) : null,
+        tier: tier, date_shirt_sent: tier !== "No Shirt" ? ($("e_shirt_sent").value || null) : null,
+        address_line1: $("e_address_line1").value.trim() || null,
+        address_line2: $("e_address_line2").value.trim() || null,
+        city: $("e_city").value.trim() || null, state: $("e_state").value.trim() || null,
+        postal_code: $("e_postal_code").value.trim() || null,
+        shirt_size: $("e_shirt_size").value || null, is_admin: $("e_is_admin").checked
+    };
+    try {
+        await adminUpdateMember(selectedMemberId, fields);
+        setStatus("members-status", "Saved.", false);
+        await loadMembers(); await loadTools();
+    } catch (err) { setStatus("members-status", err.message, true); }
+}
+
+// ---- Events (admin): create + edit ---------------------------------
+async function loadAdminEvents() {
+    try {
+        eventsCache = await listEvents();
+        renderEventsTable(eventsCache);
+        populateEventSelects(eventsCache);
+    } catch (err) { setStatus("events-status", err.message, true); }
+}
+function renderEventsTable(events) {
+    const tbody = $("events-body"); tbody.innerHTML = "";
+    const n = Math.min(events.length, MAX_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const ev = events[i];
+        const tr = document.createElement("tr"); tr.className = "clickable"; tr.tabIndex = 0;
+        tr.dataset.start = String(new Date(ev.start_at).getTime());
+        addCell(tr, ev.name); addCell(tr, fmtDT(ev.start_at));
+        addCell(tr, fmtDT(ev.end_at)); addCell(tr, ev.location || "");
+        tr.addEventListener("click", function () { selectEvent(ev); });
+        tr.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectEvent(ev); }
+        });
+        tbody.appendChild(tr);
+    }
+    tfRefresh("events");
+}
+function populateEventSelects(events) {
+    const targets = ["log-event-select", "bulk-event-select", "manage-event-select"];
+    for (let t = 0; t < targets.length; t += 1) {
+        const sel = $(targets[t]);
+        if (!sel) { continue; }
+        sel.innerHTML = "";
+        const n = Math.min(events.length, MAX_ROWS);
+        for (let i = 0; i < n; i += 1) {
+            const opt = document.createElement("option");
+            opt.value = events[i].id;
+            opt.textContent = events[i].name + " (" + fmtDT(events[i].start_at) + ")";
+            sel.appendChild(opt);
+        }
+    }
+}
+async function onCreateEvent(event) {
+    event.preventDefault();
+    const start = $("ev_start").value, end = $("ev_end").value;
+    if (!$("ev_name").value.trim() || !start) {
+        setStatus("events-status", "Name and start time are required.", true); return; }
+    if (end && end < start) { setStatus("events-status", "End time must be after start time.", true); return; }
+    try {
+        await adminCreateEvent({ name: $("ev_name").value.trim(), start_at: start,
+            end_at: end || null, location: $("ev_location").value.trim(),
+            description: $("ev_desc").value.trim() });
+        setStatus("events-status", "Event created.", false);
+        $("create-event-form").reset();
+        await loadAdminEvents();
+    } catch (err) { setStatus("events-status", err.message, true); }
+}
+function selectEvent(ev) {
+    selectedEventId = ev.id;
+    $("ee_name").value = ev.name || ""; $("ee_location").value = ev.location || "";
+    $("ee_start").value = toLocalInput(ev.start_at); $("ee_end").value = toLocalInput(ev.end_at);
+    $("ee_desc").value = ev.description || "";
+    show("edit-event-form");
+}
+async function onSaveEvent(event) {
+    event.preventDefault();
+    if (!selectedEventId) { return; }
+    const start = $("ee_start").value, end = $("ee_end").value;
+    if (!$("ee_name").value.trim() || !start) {
+        setStatus("edit-event-status", "Name and start time are required.", true); return; }
+    if (end && end < start) { setStatus("edit-event-status", "End time must be after start time.", true); return; }
+    try {
+        await adminUpdateEvent(selectedEventId, { name: $("ee_name").value.trim(),
+            start_at: start, end_at: end || null, location: $("ee_location").value.trim(),
+            description: $("ee_desc").value.trim() });
+        setStatus("edit-event-status", "Event updated.", false);
+        await loadAdminEvents(); await loadSummary();
+    } catch (err) { setStatus("edit-event-status", err.message, true); }
+}
+function onCancelEditEvent() { selectedEventId = null; hide("edit-event-form"); }
+
+// ---- Summary -------------------------------------------------------
+async function loadSummary() {
+    try {
+        const rows = await adminEventHoursSummary();
+        const tbody = $("summary-body"); tbody.innerHTML = "";
+        summaryRows = rows;
+        const n = Math.min(rows.length, MAX_ROWS);
+        for (let i = 0; i < n; i += 1) {
+            const r = rows[i];
+            const tr = document.createElement("tr");
+            const flagged = Number(r.attended_count) > 0 && !(Number(r.total_hours) > 0);
+            tr.dataset.flag = flagged ? "1" : "0";
+            tr.dataset.hours = String(Number(r.total_hours) > 0 ? 1 : 0);
+            if (flagged) { tr.classList.add("flag"); }
+            addCell(tr, r.event_name); addCell(tr, fmtDT(r.start_at));
+            addCell(tr, r.location || ""); addCell(tr, String(r.rsvp_count || 0));
+            addCell(tr, String(r.attended_count));
+            addCell(tr, String(r.member_count)); addCell(tr, String(r.total_hours));
+            tbody.appendChild(tr);
+        }
+        tfRefresh("summary");
+        renderAdminDash();
+    } catch (err) { setStatus("summary-status", err.message, true); }
+}
+async function refreshDerived() { await Promise.all([loadSummary(), loadMembers()]); }
+
+// ---- Tools: single log + bulk (type-ahead) -------------------------
+async function loadTools() {
+    try {
+        if (!allMembers.length) { allMembers = await adminFetchAllMembers(); }
+        const active = allMembers.filter(function (m) { return !m.archived; });  // no archived in logging tools
+        populateMemberSelect("log-member-select", active);
+        renderBulkRows();
+    } catch (err) { setStatus("bulk-status", err.message, true); }
+}
+function memberLabel(m) {
+    const name = m.full_name ? m.full_name + " " : "";
+    return name + "<" + m.email + ">" + (m.is_member ? "" : " (non-member)");
+}
+function populateMemberSelect(selectId, members) {
+    const sel = $(selectId);
+    if (!sel) { return; }
+    sel.innerHTML = "";
+    const n = Math.min(members.length, MAX_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const opt = document.createElement("option");
+        opt.value = members[i].id; opt.textContent = memberLabel(members[i]);
+        sel.appendChild(opt);
+    }
+}
+function updateLogTotalPreview() {
+    const h = Number($("log-hours-input").value) || 0;
+    const t = Number($("log-travel-input").value) || 0;
+    $("log-total-preview").textContent = String(h + t);
+}
+async function onLogForMember(event) {
+    event.preventDefault();
+    const memberId = $("log-member-select").value, eventId = $("log-event-select").value;
+    const hours = Number($("log-hours-input").value);
+    const travel = Number($("log-travel-input").value || 0);
+    const notes = $("log-notes-input").value.trim();
+    if (!memberId || !eventId) { setStatus("log-status", "Select a person and an event.", true); return; }
+    if (!(hours > 0 && hours <= 24)) { setStatus("log-status", "Event hours must be between 0 and 24.", true); return; }
+    if (travel < 0 || travel > 24) { setStatus("log-status", "Travel hours must be between 0 and 24.", true); return; }
+    try {
+        await adminLogHoursFor(memberId, eventId, hours, travel, notes);
+        setStatus("log-status", "Hours saved.", false);
+        await refreshDerived();
+    } catch (err) { setStatus("log-status", err.message, true); }
+}
+function onBulkSearch() {
+    const term = $("bulk-search").value.trim().toLowerCase();
+    const results = $("bulk-search-results");
+    results.innerHTML = "";
+    if (!term) { return; }
+    const added = {};
+    for (let i = 0; i < bulkRows.length; i += 1) { added[bulkRows[i].member_id] = true; }
+    let shown = 0;
+    for (let i = 0; i < allMembers.length && shown < 8; i += 1) {
+        const m = allMembers[i];
+        if (added[m.id]) { continue; }
+        if (m.archived) { continue; }        // archived people aren't logged against
+        const hay = ((m.full_name || "") + " " + m.email).toLowerCase();
+        if (hay.indexOf(term) < 0) { continue; }
+        const div = document.createElement("div");
+        div.textContent = memberLabel(m);
+        div.addEventListener("click", function () { addBulkMember(m.id); });
+        results.appendChild(div);
+        shown += 1;
+    }
+    if (shown === 0) {
+        const div = document.createElement("div");
+        div.textContent = "No matches"; div.style.color = "var(--muted)"; div.style.cursor = "default";
+        results.appendChild(div);
+    }
+}
+function addBulkMember(mid) {
+    if (bulkRows.some(function (r) { return r.member_id === mid; })) { return; }
+    bulkRows.push({ member_id: mid });
+    $("bulk-search").value = "";
+    $("bulk-search-results").innerHTML = "";
+    renderBulkRows();
+    setStatus("bulk-status", "", false);
+}
+function memberName(mid) {
+    const m = allMembers.find(function (x) { return x.id === mid; });
+    return m ? (m.full_name || m.email) : mid;
+}
+function renderBulkRows() {
+    const tbody = $("bulk-body"); tbody.innerHTML = "";
+    const n = Math.min(bulkRows.length, MAX_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const mid = bulkRows[i].member_id;
+        const tr = document.createElement("tr"); tr.dataset.memberId = mid;
+        addCell(tr, memberName(mid));
+        const hTd = document.createElement("td");
+        const hIn = document.createElement("input");
+        hIn.type = "number"; hIn.step = "0.25"; hIn.min = "0"; hIn.max = "24"; hIn.className = "bulk-hours";
+        hTd.appendChild(hIn); tr.appendChild(hTd);
+        const tTd = document.createElement("td");
+        const tIn = document.createElement("input");
+        tIn.type = "number"; tIn.step = "0.25"; tIn.min = "0"; tIn.max = "24"; tIn.className = "bulk-travel";
+        tTd.appendChild(tIn); tr.appendChild(tTd);
+        const nTd = document.createElement("td");
+        const nIn = document.createElement("input"); nIn.type = "text"; nIn.className = "bulk-notes";
+        nTd.appendChild(nIn); tr.appendChild(nTd);
+        const aTd = document.createElement("td");
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "small danger"; del.textContent = "Remove";
+        del.addEventListener("click", function () {
+            bulkRows = bulkRows.filter(function (r) { return r.member_id !== mid; });
+            renderBulkRows();
+        });
+        aTd.appendChild(del); tr.appendChild(aTd);
+        tbody.appendChild(tr);
+    }
+}
+async function onBulkSubmit(event) {
+    event.preventDefault();
+    const eventId = $("bulk-event-select").value;
+    if (!eventId) { setStatus("bulk-status", "Select an event.", true); return; }
+    if (bulkRows.length === 0) { setStatus("bulk-status", "Add at least one person.", true); return; }
+    const rows = $("bulk-body").querySelectorAll("tr");
+    const entries = [];
+    const limit = Math.min(rows.length, MAX_ROWS);
+    for (let i = 0; i < limit; i += 1) {
+        const hours = Number(rows[i].querySelector(".bulk-hours").value);
+        const travel = Number(rows[i].querySelector(".bulk-travel").value || 0);
+        const notesEl = rows[i].querySelector(".bulk-notes");
+        if (!(hours > 0 && hours <= 24)) { setStatus("bulk-status", "Row " + (i + 1) + ": event hours must be 0-24.", true); return; }
+        if (travel < 0 || travel > 24) { setStatus("bulk-status", "Row " + (i + 1) + ": travel must be 0-24.", true); return; }
+        entries.push({ member_id: rows[i].dataset.memberId, hours: hours, travel: travel,
+            notes: notesEl ? notesEl.value.trim() : "" });
+    }
+    try {
+        const count = await adminBulkLogHours(eventId, entries);
+        setStatus("bulk-status", "Saved " + count + " entries.", false);
+        bulkRows = []; renderBulkRows();
+        await refreshDerived();
+    } catch (err) { setStatus("bulk-status", err.message, true); }
+}
+
+// ---- Manage existing hours entries ---------------------------------
+async function onLoadEntries(event) {
+    event.preventDefault();
+    const eventId = $("manage-event-select").value;
+    if (!eventId) { setStatus("manage-status", "Select an event.", true); return; }
+    try {
+        const rows = await adminListHoursForEvent(eventId);
+        renderEntries(rows);
+        setStatus("manage-status", rows.length + " entries loaded.", false);
+    } catch (err) { setStatus("manage-status", err.message, true); }
+}
+function renderEntries(rows) {
+    const tbody = $("manage-body"); tbody.innerHTML = "";
+    const n = Math.min(rows.length, MAX_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const r = rows[i], who = r.members || {};
+        const tr = document.createElement("tr");
+        tr.dataset.notes = r.notes ? "1" : "0";
+        addCell(tr, who.full_name || ""); addCell(tr, who.email || "");
+        const hTd = document.createElement("td");
+        const hIn = document.createElement("input");
+        hIn.type = "number"; hIn.step = "0.25"; hIn.min = "0"; hIn.max = "24";
+        hIn.value = String(r.hours); hIn.className = "entry-hours"; hIn.setAttribute("aria-label", "Event hours for " + (who.full_name || who.email || "entry"));
+        hTd.appendChild(hIn); tr.appendChild(hTd);
+        const tTd = document.createElement("td");
+        const tIn = document.createElement("input");
+        tIn.type = "number"; tIn.step = "0.25"; tIn.min = "0"; tIn.max = "24";
+        tIn.value = String(r.travel_time); tIn.className = "entry-travel"; tIn.setAttribute("aria-label", "Travel hours for " + (who.full_name || who.email || "entry"));
+        tTd.appendChild(tIn); tr.appendChild(tTd);
+        const totalTd = document.createElement("td");
+        totalTd.textContent = String(r.total_hours); tr.appendChild(totalTd);
+        const nTd = document.createElement("td");
+        const nIn = document.createElement("input");
+        nIn.type = "text"; nIn.value = r.notes || ""; nIn.className = "entry-notes"; nIn.setAttribute("aria-label", "Notes for " + (who.full_name || who.email || "entry"));
+        nTd.appendChild(nIn); tr.appendChild(nTd);
+        const aTd = document.createElement("td");
+        const wrap = document.createElement("div"); wrap.className = "row-actions";
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button"; saveBtn.className = "small"; saveBtn.textContent = "Save";
+        saveBtn.addEventListener("click", function () { onSaveEntry(r.id, hIn, tIn, nIn); });
+        const delBtn = document.createElement("button");
+        delBtn.type = "button"; delBtn.className = "small danger"; delBtn.textContent = "Delete";
+        delBtn.addEventListener("click", function () { onDeleteEntry(r.id, tr); });
+        wrap.appendChild(saveBtn); wrap.appendChild(delBtn);
+        aTd.appendChild(wrap); tr.appendChild(aTd);
+        tbody.appendChild(tr);
+    }
+    tfRefresh("manage");
+}
+async function onSaveEntry(entryId, hoursInput, travelInput, notesInput) {
+    const hours = Number(hoursInput.value), travel = Number(travelInput.value || 0);
+    if (!(hours > 0 && hours <= 24)) { setStatus("manage-status", "Event hours must be between 0 and 24.", true); return; }
+    if (travel < 0 || travel > 24) { setStatus("manage-status", "Travel hours must be between 0 and 24.", true); return; }
+    try {
+        await adminUpdateHoursEntry(entryId, { hours: hours, travel_time: travel,
+            notes: notesInput.value.trim() || null });
+        setStatus("manage-status", "Entry updated.", false);
+        await refreshDerived();
+        await onLoadEntries({ preventDefault: function () {} });
+    } catch (err) { setStatus("manage-status", err.message, true); }
+}
+async function onDeleteEntry(entryId, rowEl) {
+    if (!window.confirm("Delete this hours entry? This cannot be undone.")) { return; }
+    try {
+        await adminDeleteHoursEntry(entryId);
+        if (rowEl && rowEl.parentNode) { rowEl.parentNode.removeChild(rowEl); }
+        setStatus("manage-status", "Entry deleted.", false);
+        await refreshDerived();
+    } catch (err) { setStatus("manage-status", err.message, true); }
+}
+
+function onLogout() { logout(); window.location.reload(); }
+
+
+// =====================================================================
+// VA UI MODULE: in-page tabs, table search/filters, metric cards, charts
+// =====================================================================
+const VA = { ok: "#008300", warn: "#eda100", bad: "#e34948", link: "#2a78d6", brand: "#003e73", unknown: "#898781" };
+
+// ---- Light / dark theme toggle (saved in localStorage) ---------------
+function currentTheme() { return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light"; }
+function initThemeToggle() {
+    const btn = $("theme-toggle");
+    function sync() {
+        const dark = currentTheme() === "dark";
+        btn.setAttribute("aria-pressed", String(dark));
+        btn.textContent = "Dark theme";
+    }
+    sync();
+    btn.addEventListener("click", function () {
+        const next = currentTheme() === "dark" ? "light" : "dark";
+        if (next === "dark") { document.documentElement.setAttribute("data-theme", "dark"); }
+        else { document.documentElement.removeAttribute("data-theme"); }
+        try { localStorage.setItem("mmp.theme", next); } catch (e) { /* ignore */ }
+        sync();
+        if (me) { renderMemberDash(); if (!$("admin-view").hidden) { renderAdminDash(); } }   // redraw charts in new colors
+    });
+}
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+// ---- In-page tabs (role=tablist; roving tabindex; arrow keys) --------
+function initTabs() {
+    const list = $("admin-tabs");
+    if (!list) { return; }
+    const tabs = Array.prototype.slice.call(list.querySelectorAll('[role="tab"]'));
+    function select(tab, focus) {
+        tabs.forEach(function (t) {
+            const on = t === tab;
+            t.setAttribute("aria-selected", String(on));
+            t.tabIndex = on ? 0 : -1;
+            const panel = $(t.getAttribute("aria-controls"));
+            if (panel) { panel.hidden = !on; }
+        });
+        if (focus) { tab.focus(); }
+    }
+    tabs.forEach(function (t, i) {
+        t.addEventListener("click", function () { select(t, false); });
+        t.addEventListener("keydown", function (e) {
+            let next = null;
+            if (e.key === "ArrowRight") { next = tabs[(i + 1) % tabs.length]; }
+            else if (e.key === "ArrowLeft") { next = tabs[(i - 1 + tabs.length) % tabs.length]; }
+            else if (e.key === "Home") { next = tabs[0]; }
+            else if (e.key === "End") { next = tabs[tabs.length - 1]; }
+            if (next) { e.preventDefault(); select(next, true); }
+        });
+    });
+}
+
+// ---- Table search + filter buttons + "N of M shown" ------------------
+const TF_CFG = {
+    hours: { tbody: "hours-body", search: "hours-search", filters: "hours-filters", count: "hours-count",
+        list: [
+            { key: "all", label: "All", test: function () { return true; } },
+            { key: "travel", label: "With travel", test: function (tr) { return tr.dataset.travel === "1"; } },
+            { key: "notes", label: "With notes", test: function (tr) { return tr.dataset.notes === "1"; } }] },
+    events: { tbody: "events-body", search: "events-search", filters: "events-filters", count: "events-count",
+        list: [
+            { key: "all", label: "All", test: function () { return true; } },
+            { key: "upcoming", label: "Upcoming", test: function (tr) { return Number(tr.dataset.start) >= Date.now(); } },
+            { key: "past", label: "Past", test: function (tr) { return Number(tr.dataset.start) < Date.now(); } }] },
+    summary: { tbody: "summary-body", search: "summary-search", filters: "summary-filters", count: "summary-count",
+        list: [
+            { key: "all", label: "All", test: function () { return true; } },
+            { key: "attention", label: "Needs attention", test: function (tr) { return tr.dataset.flag === "1"; } },
+            { key: "hours", label: "Has hours", test: function (tr) { return tr.dataset.hours === "1"; } }] },
+    manage: { tbody: "manage-body", search: "manage-search", filters: "manage-filters", count: "manage-count",
+        list: [
+            { key: "all", label: "All", test: function () { return true; } },
+            { key: "notes", label: "With notes", test: function (tr) { return tr.dataset.notes === "1"; } }] }
+};
+function initTableFilters() {
+    Object.keys(TF_CFG).forEach(function (id) {
+        const c = TF_CFG[id];
+        c.active = "all";
+        $(c.search).addEventListener("input", function () { tfRefresh(id); });
+        tfRefresh(id);
+    });
+}
+function tfRefresh(id) {
+    const c = TF_CFG[id];
+    if (!c) { return; }
+    const rows = Array.prototype.slice.call($(c.tbody).rows);
+    const term = ($(c.search).value || "").trim().toLowerCase();
+    const current = c.list.filter(function (f) { return f.key === c.active; })[0] || c.list[0];
+    let shown = 0;
+    rows.forEach(function (tr) {
+        const ok = current.test(tr) && (!term || tr.textContent.toLowerCase().indexOf(term) >= 0);
+        tr.hidden = !ok;
+        if (ok) { shown += 1; }
+    });
+    const host = $(c.filters);
+    host.innerHTML = "";
+    c.list.forEach(function (f) {
+        const n = rows.filter(function (tr) { return f.test(tr); }).length;
+        const b = document.createElement("button");
+        b.type = "button"; b.textContent = f.label + " (" + n + ")";
+        b.setAttribute("aria-pressed", String(f.key === current.key));
+        b.addEventListener("click", function () { c.active = f.key; tfRefresh(id); });
+        host.appendChild(b);
+    });
+    $(c.count).textContent = shown + " of " + rows.length + " shown";
+}
+
+// ---- Metric cards ----------------------------------------------------
+function renderMetrics(hostId, items) {
+    const host = $(hostId);
+    host.innerHTML = "";
+    items.forEach(function (it) {
+        const d = document.createElement("div");
+        d.className = "metric" + (it.tone ? " " + it.tone : "");
+        const l = document.createElement("div"); l.className = "m-label"; l.textContent = it.label;
+        const v = document.createElement("div"); v.className = "m-value"; v.textContent = it.value;
+        d.appendChild(l); d.appendChild(v);
+        if (it.sub) { const s2 = document.createElement("div"); s2.className = "m-sub"; s2.textContent = it.sub; d.appendChild(s2); }
+        host.appendChild(d);
+    });
+}
+function fmtNum(n) { return String(Math.round((Number(n) || 0) * 100) / 100); }
+function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
+
+// ---- Charts (Chart.js; accessible via aria-label + hidden data table) -
+function drawChart(key, canvasId, type, labels, values, colors, dataHostId, caption, valueHeader) {
+    const canvas = $(canvasId);
+    if (charts[key]) { charts[key].destroy(); charts[key] = null; }
+    // Hidden data table for screen readers
+    const host = $(dataHostId);
+    host.innerHTML = "";
+    const tbl = document.createElement("table");
+    const cap2 = document.createElement("caption"); cap2.textContent = caption; tbl.appendChild(cap2);
+    const hr = document.createElement("tr");
+    ["Category", valueHeader].forEach(function (h) {
+        const th = document.createElement("th"); th.scope = "col"; th.textContent = h; hr.appendChild(th);
+    });
+    const thead = document.createElement("thead"); thead.appendChild(hr); tbl.appendChild(thead);
+    const tb = document.createElement("tbody");
+    labels.forEach(function (lb, i) {
+        const tr = document.createElement("tr");
+        addCell(tr, lb); addCell(tr, fmtNum(values[i])); tb.appendChild(tr);
+    });
+    tbl.appendChild(tb); host.appendChild(tbl);
+    canvas.setAttribute("aria-label", caption + ": " + labels.map(function (lb, i) { return lb + " " + fmtNum(values[i]); }).join(", "));
+    if (typeof Chart === "undefined" || canvas.offsetParent === null) { return; }   // not visible yet
+    const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const isDonut = type === "doughnut";
+    const options = {
+        responsive: true, maintainAspectRatio: false,
+        animation: reduce ? false : undefined,
+        plugins: { legend: { display: isDonut, position: "bottom" } }
+    };
+    if (!isDonut) {
+        options.scales = {
+            y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: cssVar("--grid") } },
+            x: { grid: { display: false } }
+        };
+    }
+    Chart.defaults.color = cssVar("--muted");
+    Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Source Sans Pro', 'Segoe UI', sans-serif";
+    charts[key] = new Chart(canvas, {
+        type: type,
+        data: { labels: labels, datasets: [{ label: valueHeader, data: values, backgroundColor: colors, borderWidth: isDonut ? 2 : 0, borderColor: cssVar("--surface") }] },
+        options: options
+    });
+}
+
+function renderMemberDash() {
+    if (!$("member-metrics") || !me) { return; }
+    const rows = memberStats.rows || [];
+    let total = 0, travel = 0, evHours = 0;
+    rows.forEach(function (r) {
+        total += Number(r.total_hours) || 0; travel += Number(r.travel_time) || 0; evHours += Number(r.hours) || 0;
+    });
+    const attended = Object.keys(attendanceMap).filter(function (k) { return attendanceMap[k]; }).length;
+    const status = me.is_member ? me.membership_status : null;
+    renderMetrics("member-metrics", [
+        { label: "Membership", value: me.is_member ? cap(status) : "Not a member",
+          sub: me.is_member ? (me.tier + " tier") : "Ask an administrator to add one",
+          tone: status === "active" ? "ok" : (status === "lapsed" || status === "suspended") ? "warn" : "" },
+        { label: "Total hours logged", value: fmtNum(total), sub: rows.length + (rows.length === 1 ? " entry" : " entries") },
+        { label: "Events attended", value: String(attended) },
+        { label: "Upcoming events", value: String(memberStats.upcoming || 0) }
+    ]);
+    // Chart 1: hours per event (chronological, latest 10)
+    const byEvent = {};
+    rows.forEach(function (r) {
+        const nm = r.events ? r.events.name : "Event";
+        byEvent[nm] = (byEvent[nm] || 0) + (Number(r.total_hours) || 0);
+    });
+    const names = Object.keys(byEvent).slice(0, 10);
+    const empty1 = $("chart-my-hours-empty"), empty2 = $("chart-my-split-empty");
+    empty1.hidden = names.length > 0; empty2.hidden = total > 0;
+    $("chart-my-hours-box").hidden = names.length === 0;
+    $("chart-my-split-box").hidden = !(total > 0);
+    if (names.length) {
+        drawChart("myHours", "chart-my-hours", "bar", names, names.map(function (n) { return byEvent[n]; }),
+            VA.link, "chart-my-hours-data", "My volunteer hours by event", "Hours");
+    }
+    if (total > 0) {
+        drawChart("mySplit", "chart-my-split", "doughnut", ["Event hours", "Travel hours"], [evHours, travel],
+            [currentTheme() === "dark" ? "#8fc1ff" : VA.brand, VA.link], "chart-my-split-data", "Event hours versus travel hours", "Hours");
+    }
+}
+
+function renderAdminDash() {
+    if (!$("admin-metrics")) { return; }
+    const people = allMembers.filter(function (m) { return !m.archived; });
+    const members = people.filter(function (m) { return m.is_member; });
+    const active = members.filter(function (m) { return m.membership_status === "active"; });
+    const attention = members.filter(needsAttention);
+    let hours = 0;
+    if (summaryRows.length) { summaryRows.forEach(function (r) { hours += Number(r.total_hours) || 0; }); }
+    else { people.forEach(function (m) { hours += Number(m.total_hours) || 0; }); }
+    renderMetrics("admin-metrics", [
+        { label: "People", value: String(people.length), sub: "Excludes archived" },
+        { label: "Members", value: String(members.length), sub: active.length + " active", tone: "ok" },
+        { label: "Needs attention", value: String(attention.length), sub: "Lapsed or suspended",
+          tone: attention.length ? "warn" : "ok" },
+        { label: "Volunteer hours", value: fmtNum(hours), sub: "All events" },
+        { label: "Events", value: String(summaryRows.length) }
+    ]);
+    const counts = { active: 0, pending: 0, lapsed: 0, suspended: 0 };
+    members.forEach(function (m) { if (counts[m.membership_status] !== undefined) { counts[m.membership_status] += 1; } });
+    const labels = ["Active", "Pending", "Lapsed", "Suspended", "Non-member"];
+    const vals = [counts.active, counts.pending, counts.lapsed, counts.suspended, people.length - members.length];
+    drawChart("status", "chart-status", "doughnut", labels, vals,
+        [VA.ok, VA.unknown, VA.warn, VA.bad, VA.link], "chart-status-data", "People by membership status", "People");
+    const evs = summaryRows.slice().sort(function (a, b) { return new Date(a.start_at) - new Date(b.start_at); }).slice(-10);
+    $("chart-event-hours-empty").hidden = evs.length > 0;
+    $("chart-event-hours").parentNode.hidden = evs.length === 0;
+    if (evs.length) {
+        drawChart("eventHours", "chart-event-hours", "bar", evs.map(function (r) { return r.event_name; }),
+            evs.map(function (r) { return Number(r.total_hours) || 0; }), VA.link,
+            "chart-event-hours-data", "Volunteer hours by event", "Hours");
+    }
+}
+
+// ---- Wire up -------------------------------------------------------
+window.addEventListener("DOMContentLoaded", function () {
+    initOrg();
+    initTabs();
+    initThemeToggle();
+    initTableFilters();
+    $("request-code-form").addEventListener("submit", onRequestCode);
+    $("verify-code-form").addEventListener("submit", onVerifyCode);
+    $("logout-btn").addEventListener("click", onLogout);
+    $("tab-member").addEventListener("click", showMemberView);
+    $("tab-admin").addEventListener("click", showAdminView);
+
+    // Member view
+    $("profile-form").addEventListener("submit", onSaveProfile);
+    $("profile-toggle").addEventListener("click", function () {
+        const form = $("profile-form");
+        form.hidden = !form.hidden;
+        $("profile-toggle").textContent = form.hidden ? "View profile" : "Hide profile";
+    });
+    $("hours-form").addEventListener("submit", onLogHours);
+    $("hours-input").addEventListener("input", updateTotalPreview);
+    $("travel-input").addEventListener("input", updateTotalPreview);
+    $("f_phone").addEventListener("input", onPhoneInput);
+
+    // Admin: people
+    $("edit-form").addEventListener("submit", onSaveMember);
+    $("archive-btn").addEventListener("click", onArchiveToggle);
+    $("archive-confirm-btn").addEventListener("click", function () { doArchive(true); });
+    $("archive-cancel-btn").addEventListener("click", onArchiveCancel);
+    $("show-archived").addEventListener("change", function (e) {
+        showArchived = e.target.checked; pageIndex = 0; applyView();
+    });
+    $("merge-search").addEventListener("input", onMergeSearch);
+    $("merge-confirm-btn").addEventListener("click", onMergeConfirm);
+    $("merge-cancel-btn").addEventListener("click", onMergeCancel);
+    $("create-member-form").addEventListener("submit", onCreateMember);
+    $("new-member-btn").addEventListener("click", toggleCreateMember);
+    $("c_phone").addEventListener("input", onPhoneInput);
+    $("e_phone").addEventListener("input", onPhoneInput);
+    $("c_type").addEventListener("change", function () { syncRenewal("c_type", "c_renewal"); });
+    $("e_type").addEventListener("change", function () { syncRenewal("e_type", "e_renewal"); });
+    $("c_tier").addEventListener("change", function () { syncShirtDate("c_tier", "c_shirt_sent"); });
+    $("e_tier").addEventListener("change", function () { syncShirtDate("e_tier", "e_shirt_sent"); });
+    $("member-search").addEventListener("input", onSearch);
+    $("import-file").addEventListener("change", onImportFile);
+    $("download-template").addEventListener("click", downloadTemplate);
+    const heads = document.querySelectorAll("#members-head th.sortable");
+    for (let i = 0; i < heads.length; i += 1) { heads[i].addEventListener("click", onSortHeader); }
+
+    // Admin: events / hours
+    $("create-event-form").addEventListener("submit", onCreateEvent);
+    $("edit-event-form").addEventListener("submit", onSaveEvent);
+    $("cancel-edit-event").addEventListener("click", onCancelEditEvent);
+    $("log-form").addEventListener("submit", onLogForMember);
+    $("log-hours-input").addEventListener("input", updateLogTotalPreview);
+    $("log-travel-input").addEventListener("input", updateLogTotalPreview);
+    $("bulk-search").addEventListener("input", onBulkSearch);
+    $("bulk-form").addEventListener("submit", onBulkSubmit);
+    $("manage-form").addEventListener("submit", onLoadEntries);
+    $("prev-page").addEventListener("click", onPrevPage);
+    $("next-page").addEventListener("click", onNextPage);
+    $("export-members").addEventListener("click", onExportMembers);
+    $("export-hours").addEventListener("click", onExportHours);
+
+    if (loadSession() !== null) { enterApp(); }
+});
