@@ -289,7 +289,7 @@ async function loadMemberEvents() {
         memberStats.upcoming = upcoming.length;
         const list = $("events-list"); list.innerHTML = "";
         renderEventGroup(list, "Upcoming", upcoming, true);
-        renderPastDropdown(list, past, false);
+        renderPastList(list, past);
         const select = $("event-select"); select.innerHTML = "";
         const ordered = upcoming.concat(past);
         for (let i = 0; i < ordered.length; i += 1) {
@@ -335,30 +335,36 @@ function renderEventGroup(container, heading, events) {
         container.appendChild(card);
     }
 }
-function renderPastDropdown(container, events, upcoming) {
+// Past events: a collapsible "Past events (N)" section that lists the same
+// cards as Upcoming, newest first, a page at a time. (Replaces the earlier
+// <select> dropdown, which could size itself to its longest option and run
+// off the side of narrow phone screens.)
+const PAST_PAGE_SIZE = 10;
+function renderPastList(container, events) {
     if (events.length === 0) { return; }
-    const h = document.createElement("h3"); h.textContent = "Past"; container.appendChild(h);
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", "Past events");
-    const blank = document.createElement("option");
-    blank.value = ""; blank.textContent = "-- select a past event to view --";
-    select.appendChild(blank);
-    const n = Math.min(events.length, MAX_RENDER_ROWS);
-    for (let i = 0; i < n; i += 1) {
-        const opt = document.createElement("option");
-        opt.value = events[i].id;
-        opt.textContent = events[i].name + " (" + fmtDT(events[i].start_at) + ")";
-        select.appendChild(opt);
+    const total = Math.min(events.length, MAX_RENDER_ROWS);
+    const details = document.createElement("details");
+    details.className = "past-events";
+    const summary = document.createElement("summary");
+    summary.textContent = "Past events (" + total + ")";
+    details.appendChild(summary);
+    const list = document.createElement("div");
+    list.className = "past-list";
+    details.appendChild(list);
+    const more = document.createElement("button");
+    more.type = "button"; more.className = "secondary small past-more";
+    details.appendChild(more);
+    let shown = 0;
+    function showNext() {
+        const next = Math.min(shown + PAST_PAGE_SIZE, total);
+        renderEventGroup(list, null, events.slice(shown, next));
+        shown = next;
+        more.hidden = shown >= total;
+        more.textContent = "Show more (" + (total - shown) + " remaining)";
     }
-    container.appendChild(select);
-    const detail = document.createElement("div"); detail.style.marginTop = ".5rem";
-    container.appendChild(detail);
-    select.addEventListener("change", function () {
-        detail.innerHTML = "";
-        if (!select.value) { return; }
-        const ev = events.find(function (e) { return e.id === select.value; });
-        if (ev) { renderEventGroup(detail, null, [ev], upcoming); }
-    });
+    more.addEventListener("click", showNext);
+    showNext();
+    container.appendChild(details);
 }
 async function onToggleRsvp(eventId, checkbox) {
     const desired = checkbox.checked;
