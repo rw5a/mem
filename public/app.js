@@ -121,20 +121,61 @@ function syncShirtDate(tierId, dateId) {
 }
 
 // ---- Login + single entry ------------------------------------------
+// Show that a button was clicked and work is in progress: disables it,
+// adds a spinner, and swaps its label (e.g. "Sending code..."). Returns a
+// function that puts the button back (optionally with a new label).
+function setBusy(button, busyLabel) {
+    if (!button) { return function () {}; }
+    const original = button.textContent;
+    button.disabled = true;
+    button.classList.add("busy");
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "";
+    const spin = document.createElement("span"); spin.className = "spinner"; spin.setAttribute("aria-hidden", "true");
+    button.appendChild(spin);
+    button.appendChild(document.createTextNode(busyLabel));
+    return function (newLabel) {
+        button.disabled = false;
+        button.classList.remove("busy");
+        button.removeAttribute("aria-busy");
+        button.textContent = newLabel || original;
+    };
+}
+function setInfo(id, message) {
+    const el = $(id);
+    if (el) { el.textContent = message; el.className = "status info"; }
+}
 async function onRequestCode(event) {
     event.preventDefault();
+    const email = $("login-email").value.trim();
+    const button = event.submitter || document.querySelector("#request-code-form button[type=submit]");
+    const done = setBusy(button, "Sending code\u2026");
+    setInfo("login-status", "Sending a sign-in code to " + email + "\u2026");
     try {
-        await requestLoginCode($("login-email").value.trim());
+        await requestLoginCode(email);
+        done("Resend code");
+        if (button) { button.classList.add("secondary"); }   // the code box is now the main step
         show("verify-section");
-        setStatus("login-status", "Check your email for a 8-digit code.", false);
-    } catch (err) { setStatus("login-status", err.message, true); }
+        setStatus("login-status", "Code sent to " + email + ". Check your email (and spam folder) for the 8-digit code.", false);
+        $("login-code").focus();
+    } catch (err) {
+        done();
+        setStatus("login-status", err.message, true);
+    }
 }
 async function onVerifyCode(event) {
     event.preventDefault();
+    const button = event.submitter || document.querySelector("#verify-code-form button[type=submit]");
+    const done = setBusy(button, "Signing in\u2026");
+    setInfo("login-status", "Checking your code\u2026");
     try {
         await verifyLoginCode($("login-email").value.trim(), $("login-code").value.trim());
         await enterApp();
-    } catch (err) { setStatus("login-status", err.message, true); }
+        done();
+    } catch (err) {
+        done();
+        setStatus("login-status", err.message, true);
+    }
 }
 async function enterApp() {
     let profile;
@@ -349,7 +390,9 @@ async function loadMemberEvents() {
     } catch (err) { setStatus("hours-status", err.message, true); }
     renderMemberDash();
 }
-function renderEventGroup(container, heading, events) {
+// upcoming = true  -> "I'm planning to attend" (RSVP) checkbox
+// upcoming = false -> "I attended this event" checkbox (past events)
+function renderEventGroup(container, heading, events, upcoming) {
     if (events.length === 0) { return; }
     if (heading) {
         const h = document.createElement("h3"); h.textContent = heading; container.appendChild(h);
@@ -370,14 +413,29 @@ function renderEventGroup(container, heading, events) {
         }
         const wrap = document.createElement("label"); wrap.className = "attend";
         const cb = document.createElement("input"); cb.type = "checkbox";
-        cb.checked = !!attendanceMap[ev.id];
-        cb.addEventListener("change", function () { onToggleAttendance(ev.id, cb); });
-        const span = document.createElement("span"); span.textContent = "I attended this event";
-        wrap.appendChild(cb); wrap.appendChild(span); card.appendChild(wrap);
+        const span = document.createElement("span");
+        const note = document.createElement("span");
+        note.className = "save-note";
+        note.setAttribute("role", "status");
+        note.setAttribute("aria-live", "polite");
+        if (upcoming) {
+            cb.checked = !!rsvpMap[ev.id];
+            cb.addEventListener("change", function () { onToggleRsvp(ev.id, cb, note); });
+            span.textContent = "I\u2019m planning to attend";
+        } else {
+            cb.checked = !!attendanceMap[ev.id];
+            cb.addEventListener("change", function () { onToggleAttendance(ev.id, cb, note); });
+            span.textContent = "I attended this event";
+        }
+        wrap.appendChild(cb); wrap.appendChild(span);
+        const row = document.createElement("div"); row.className = "attend-row";
+        row.appendChild(wrap); row.appendChild(note); card.appendChild(row);
         if (!profileComplete(me)) {
             const hint = document.createElement("div");
             hint.className = "event-meta hint-warn";
-            hint.textContent = "Complete your profile to log hours or attendance.";
+            hint.textContent = upcoming
+                ? "Complete your profile to RSVP."
+                : "Complete your profile to log hours or attendance.";
             card.appendChild(hint);
         }
         container.appendChild(card);
@@ -405,7 +463,7 @@ function renderPastList(container, events) {
     let shown = 0;
     function showNext() {
         const next = Math.min(shown + PAST_PAGE_SIZE, total);
-        renderEventGroup(list, null, events.slice(shown, next));
+        renderEventGroup(list, null, events.slice(shown, next), false);
         shown = next;
         more.hidden = shown >= total;
         more.textContent = "Show more (" + (total - shown) + " remaining)";
@@ -414,22 +472,48 @@ function renderPastList(container, events) {
     showNext();
     container.appendChild(details);
 }
-async function onToggleRsvp(eventId, checkbox) {
-    const desired = checkbox.checked;
-    try { await setMyRsvp(eventId, desired); rsvpMap[eventId] = desired; }
-    catch (err) { checkbox.checked = !desired; setStatus("hours-status", err.message, true); }
+// Small inline "Saving... / Saved / Couldn't save" note beside a checkbox.
+function showSaveNote(note, state, message) {
+    if (!note) { return; }
+    clearTimeout(note._timer);
+    note.className = "save-note " + state;
+    note.textContent = message;
+    if (state === "saved") {
+        note._timer = setTimeout(function () {
+            note.classList.add("fade");
+            note._timer = setTimeout(function () { note.textContent = ""; note.className = "save-note"; }, 400);
+        }, 2000);
+    }
 }
-async function onToggleAttendance(eventId, checkbox) {
+async function saveToggle(checkbox, note, needsProfileMsg, saveFn, map, eventId) {
     const desired = checkbox.checked;
     if (!profileComplete(me)) {
         checkbox.checked = !desired;
-        setStatus("hours-status",
-            "Add your first name, last name, and phone in My profile (then Save) before marking attendance.",
-            true);
+        showSaveNote(note, "error", needsProfileMsg);
         return;
     }
-    try { await setMyAttendance(eventId, desired); attendanceMap[eventId] = desired; }
-    catch (err) { checkbox.checked = !desired; setStatus("hours-status", err.message, true); }
+    checkbox.disabled = true;
+    showSaveNote(note, "saving", "Saving\u2026");
+    try {
+        await saveFn(eventId, desired);
+        map[eventId] = desired;
+        showSaveNote(note, "saved", desired ? "Saved" : "Removed");
+    } catch (err) {
+        checkbox.checked = !desired;
+        showSaveNote(note, "error", "Couldn\u2019t save: " + err.message);
+    } finally {
+        checkbox.disabled = false;
+    }
+}
+function onToggleRsvp(eventId, checkbox, note) {
+    return saveToggle(checkbox, note,
+        "Complete My profile (first name, last name, phone) and Save before you RSVP.",
+        setMyRsvp, rsvpMap, eventId);
+}
+function onToggleAttendance(eventId, checkbox, note) {
+    return saveToggle(checkbox, note,
+        "Complete My profile (first name, last name, phone) and Save before marking attendance.",
+        setMyAttendance, attendanceMap, eventId);
 }
 function updateTotalPreview() {
     const h = Number($("hours-input").value) || 0;
@@ -1457,7 +1541,26 @@ function renderAdminDash() {
 }
 
 // ---- Wire up -------------------------------------------------------
+// Shows a plain-English message on the sign-in screen when setup files are
+// missing or broken, instead of a confusing JavaScript error later on.
+function checkStartupConfig() {
+    let problem = "";
+    if (typeof CONFIG === "undefined") {
+        problem = "Setup problem: config.js didn't load or has a typo (often a missing comma or quote "
+            + "after editing it). Open the browser console (F12) to see the line number.";
+    } else if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_PUBLISHABLE_KEY) {
+        problem = "Setup problem: the Supabase URL or publishable key is missing. On GitHub Pages, check "
+            + "the SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY repository secrets and that the latest "
+            + "Actions deploy succeeded. For local testing, create public/env.js from env.example.js.";
+    }
+    if (problem) { setStatus("login-status", problem, true); }
+    return problem === "";
+}
 window.addEventListener("DOMContentLoaded", function () {
+    if (!checkStartupConfig()) {
+        const btn = document.querySelector("#request-code-form button[type=submit]");
+        if (btn) { btn.disabled = true; }
+    }
     initOrg();
     document.querySelectorAll(".tz-note").forEach(function (el) {
         el.textContent = "Start and end times are in " + EVENT_TZ.replace(/_/g, " ")
@@ -1524,5 +1627,5 @@ window.addEventListener("DOMContentLoaded", function () {
     $("export-members").addEventListener("click", onExportMembers);
     $("export-hours").addEventListener("click", onExportHours);
 
-    if (loadSession() !== null) { enterApp(); }
+    if (loadSession() !== null && typeof CONFIG !== "undefined") { enterApp(); }
 });
