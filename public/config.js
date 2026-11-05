@@ -55,7 +55,7 @@ const ORG = Object.freeze({
     address: "Arkansas",
     phone:   "000-000-0000",
     email:   "contact@arkansasclimbers.org",
-    website: "https://arkansasclimbers.org"
+    website: "https://arkansasclimbers.org",
     // Time zone your events take place in. Everyone sees event times in this
     // zone, and admins enter times in it, regardless of their device's setting.
     // Use an IANA name, e.g. "America/New_York", "America/Chicago",
