@@ -1,6 +1,5 @@
 /* =====================================================================
-   Membership Portal - U.S. Department of Veterans Affairs UI standards
-   Palette, typography, cards, badges, tabs, tables, charts, Section 508.
+   Membership Portal
    Palette colors are used as-is for fills/borders/bars. Where a status
    color is used as TEXT on white, a darker shade is used so it meets
    WCAG 2.1 AA (4.5:1): ok #005f00, warn #7a4f00, bad #b3201f.
@@ -253,6 +252,24 @@ tr.flag:hover { background: var(--flag-hover); }
 .event-meta { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
 .attend { display: inline-flex; align-items: center; gap: .45rem; margin-top: .5rem; font-weight: 400; }
 .attend input { width: auto; }
+/* Long names, locations, or pasted links wrap instead of widening the page */
+.event-card { min-width: 0; overflow-wrap: anywhere; }
+#member-view > section { min-width: 0; max-width: 100%; }
+select { max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+
+/* Past events (collapsible) */
+.past-events { margin-top: 1rem; }
+.past-events > summary {
+  cursor: pointer; font-weight: 700; color: var(--heading); font-size: 1rem;
+  padding: .5rem 0; min-height: 44px; display: flex; align-items: center; gap: .4rem;
+  list-style: none;
+}
+.past-events > summary::-webkit-details-marker { display: none; }
+.past-events > summary::before { content: "\25B8"; display: inline-block; width: 1em; }
+.past-events[open] > summary::before { content: "\25BE"; }
+.past-events > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.past-list { margin-top: .4rem; }
+.past-more { margin-top: .25rem; }
 
 /* ---- Profile-first gate (member view) ------------------------------- */
 #member-view { display: flex; flex-direction: column; }
