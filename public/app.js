@@ -78,7 +78,7 @@ async function onRequestCode(event) {
     try {
         await requestLoginCode($("login-email").value.trim());
         show("verify-section");
-        setStatus("login-status", "Check your email for a 6-digit code.", false);
+        setStatus("login-status", "Check your email for a 8-digit code.", false);
     } catch (err) { setStatus("login-status", err.message, true); }
 }
 async function onVerifyCode(event) {
