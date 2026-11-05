@@ -162,6 +162,15 @@ button.danger { background: var(--danger-btn); color: #fff; }
 button.danger:hover { background: var(--danger-hover); }
 button.small { padding: .3rem .65rem; margin-top: 0; font-size: .85rem; }
 button:disabled { opacity: .5; cursor: not-allowed; }
+/* Busy state: button stays full-color so it reads as "working", not "unavailable" */
+button.busy, button.busy:disabled { opacity: 1; cursor: progress; display: inline-flex; align-items: center; gap: .5rem; }
+.spinner {
+  width: 1em; height: 1em; border-radius: 50%; flex: none;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.status.info { color: var(--muted); }
 .toolbar { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .6rem 0; }
 .toolbar button { margin-top: 0; }
 .spacer { flex: 1; }
@@ -252,6 +261,15 @@ tr.flag:hover { background: var(--flag-hover); }
 .event-meta { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
 .attend { display: inline-flex; align-items: center; gap: .45rem; margin-top: .5rem; font-weight: 400; }
 .attend input { width: auto; }
+.attend-row { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem .75rem; margin-top: .5rem; }
+.attend-row .attend { margin-top: 0; }
+.save-note { font-size: .85rem; font-weight: 600; transition: opacity .4s; }
+.save-note.saving { color: var(--muted); }
+.save-note.saved { color: var(--ok-text); }
+.save-note.saved::before { content: "\2713  "; }
+.save-note.error { color: var(--bad-text); flex-basis: 100%; }
+.save-note.error::before { content: "\2715  "; }
+.save-note.fade { opacity: 0; }
 /* Long names, locations, or pasted links wrap instead of widening the page */
 .event-card { min-width: 0; overflow-wrap: anywhere; }
 #member-view > section { min-width: 0; max-width: 100%; }
