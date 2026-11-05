@@ -169,6 +169,7 @@ async function onVerifyCode(event) {
     const done = setBusy(button, "Signing in\u2026");
     setInfo("login-status", "Checking your code\u2026");
     try {
+        setRememberDevice($("remember-me").checked);
         await verifyLoginCode($("login-email").value.trim(), $("login-code").value.trim());
         await enterApp();
         done();
@@ -258,7 +259,6 @@ function initOrg() {
         $("about-btn").setAttribute("aria-expanded", String(!p.hidden));
     });
 }
-function onLogout() { logout(); window.location.reload(); }
 
 // =====================================================================
 // PERSON / MEMBER VIEW
@@ -1296,7 +1296,17 @@ async function onDeleteEntry(entryId, rowEl) {
     } catch (err) { setStatus("manage-status", err.message, true); }
 }
 
-function onLogout() { logout(); window.location.reload(); }
+async function onLogout() {
+    await logout();
+    window.location.reload();
+}
+// If the sign-in can no longer be renewed (e.g. signed out on another device,
+// or revoked), return to the sign-in screen with an explanation.
+window.addEventListener("mmp:session-ended", function () {
+    if (!me) { return; }              // already on the sign-in screen
+    try { sessionStorage.setItem("mmp.notice", "Your sign-in has ended. Please sign in again."); } catch (e) { /* ignore */ }
+    window.location.reload();
+});
 
 
 // =====================================================================
@@ -1627,5 +1637,10 @@ window.addEventListener("DOMContentLoaded", function () {
     $("export-members").addEventListener("click", onExportMembers);
     $("export-hours").addEventListener("click", onExportHours);
 
+    $("remember-me").checked = rememberDevice();
+    try {
+        const notice = sessionStorage.getItem("mmp.notice");
+        if (notice) { sessionStorage.removeItem("mmp.notice"); setStatus("login-status", notice, true); }
+    } catch (e) { /* ignore */ }
     if (loadSession() !== null && typeof CONFIG !== "undefined") { enterApp(); }
 });
