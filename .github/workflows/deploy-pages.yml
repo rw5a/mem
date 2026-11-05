@@ -1,0 +1,64 @@
+# Deploys public/ to GitHub Pages and writes public/env.js from repository
+# secrets, so the Supabase URL and publishable key are never stored in the repo.
+#
+# One-time setup:
+#   Settings -> Secrets and variables -> Actions -> New repository secret:
+#     SUPABASE_URL              e.g. https://abcdefgh.supabase.co
+#     SUPABASE_PUBLISHABLE_KEY  e.g. sb_publishable_...
+#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Write public/env.js from secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_PUBLISHABLE_KEY" ]; then
+            echo "::error::Add the SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY repository secrets."
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const env = {
+              url: process.env.SUPABASE_URL.trim().replace(/\/+$/, ""),
+              publishableKey: process.env.SUPABASE_PUBLISHABLE_KEY.trim()
+            };
+            fs.writeFileSync("public/env.js",
+              "\"use strict\";\nwindow.SUPABASE_ENV = Object.freeze(" + JSON.stringify(env) + ");\n");
+          '
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
