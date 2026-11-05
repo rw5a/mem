@@ -28,11 +28,17 @@ const CONFIG = Object.freeze({
 // Your organization's branding + contact info (shown in the header and the
 // "About" panel). Leave a field as "" to hide that line. logo_url can be a
 // full URL or a path to a file you add alongside index.html (e.g. "logo.png").
+    //name:    "Your Organization",
+    //logo_url: "",                       // e.g. "logo.png" or "https://.../logo.svg"
+    //address: "123 Main St, Springfield, IL 62701",
+    //phone:   "555-123-4567",
+    //email:   "info@example.org",
+    //website: "https://example.org"
 const ORG = Object.freeze({
-    name:    "Your Organization",
+    name:    "Arkansas Climbers Coalition - User Portal",
     logo_url: "",                       // e.g. "logo.png" or "https://.../logo.svg"
-    address: "123 Main St, Springfield, IL 62701",
-    phone:   "555-123-4567",
-    email:   "info@example.org",
-    website: "https://example.org"
+    address: "Arkansas",
+    phone:   "000-000-00000",
+    email:   "contact@arkansasclimbers.org",
+    website: "https://arkansasclimbers.org"
 });
