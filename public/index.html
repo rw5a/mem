@@ -99,7 +99,7 @@
         <strong><span id="shirt-sent-date"></span></strong></p>
     </section>
 
-    <section id="sec-nonmember" hidden>
+   <section id="sec-nonmember" hidden>
       <p class="notice">You're signed in.
         You can start logging volunteer hours and marking attendance to events.
         You aren't a member yet — <a href="https://www.arkansasclimbers.org/join-now" target="_blank" rel="noopener noreferrer">Join Here!</a></p>
@@ -364,6 +364,7 @@
           <div><label for="ev_start">Start</label><input id="ev_start" type="datetime-local" required></div>
           <div><label for="ev_end">End</label><input id="ev_end" type="datetime-local"></div>
         </div>
+        <p class="flag-note tz-note"></p>
         <label for="ev_desc">Description</label>
         <textarea id="ev_desc" rows="2"></textarea>
         <button type="submit">Create event</button>
@@ -394,6 +395,7 @@
           <div><label for="ee_start">Start</label><input id="ee_start" type="datetime-local"></div>
           <div><label for="ee_end">End</label><input id="ee_end" type="datetime-local"></div>
         </div>
+        <p class="flag-note tz-note"></p>
         <label for="ee_desc">Description</label>
         <textarea id="ee_desc" rows="2"></textarea>
         <div class="toolbar">
