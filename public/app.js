@@ -5,6 +5,16 @@ const MAX_RENDER_ROWS = 500;
 const MAX_ROWS   = 5000;
 const PAGE_SIZE  = 25;
 const MAX_IMPORT = 5000;
+// People can edit/delete their own hours entry for this many days after the
+// event. Must match public.self_edit_days() in the database (default 30).
+const SELF_EDIT_DAYS = 30;
+// "Renewal due" = recurring members whose next renewal date is within this
+// many days from today (or already past).
+const RENEWAL_WINDOW_DAYS = 30;
+const DAY_MS = 24 * 3600 * 1000;
+// Types of volunteer hours. Must match the check in the database.
+const HOUR_TYPES = ["Event Day", "Administrative Work", "Other"];
+const DEFAULT_HOUR_TYPE = "Event Day";
 
 let me = null;
 let myMemberId = null;
@@ -27,11 +37,59 @@ let pageIndex = 0, searchTerm = "", sortKey = "full_name", sortDir = "asc", show
 
 // ---- Shared helpers ------------------------------------------------
 function $(id) { return document.getElementById(id); }
+// A <select> of hour types (for inline editing in tables).
+function makeTypeSelect(value, label) {
+    const sel = document.createElement("select");
+    sel.className = "hours-type";
+    HOUR_TYPES.forEach(function (t) {
+        const o = document.createElement("option"); o.value = t; o.textContent = t; sel.appendChild(o);
+    });
+    sel.value = HOUR_TYPES.indexOf(value) >= 0 ? value : DEFAULT_HOUR_TYPE;
+    if (label) { sel.setAttribute("aria-label", label); }
+    return sel;
+}
+// "Other" needs a note: mark the notes box required and say so in its label.
+function syncNoteRequired(typeEl, notesEl, labelEl) {
+    const need = typeEl.value === "Other";
+    notesEl.required = need;
+    notesEl.setAttribute("aria-required", String(need));
+    notesEl.placeholder = need ? "Describe the work (required for Other)" : "";
+    if (labelEl) { labelEl.textContent = need ? "Notes (required for Other)" : "Notes"; }
+}
+function needsNote(type, notes) { return type === "Other" && !String(notes || "").trim(); }
+// Turns database error text into plain language where we can.
+function friendlyError(err) {
+    const m = String((err && err.message) || err || "");
+    if (m.indexOf("volunteer_hours_member_event_type_key") >= 0) {
+        return "This person already has an entry of that type for this event. Edit that entry instead."; }
+    if (m.indexOf("volunteer_hours_other_needs_note") >= 0) { return "A note is required when the type is Other."; }
+    return m;
+}
 function setStatus(id, message, isError) {
     const el = $(id);
     if (!el) { return; }
     el.textContent = message || "";
     el.className = isError ? "status error" : "status ok";
+    if (message) { showToast(message, isError); }
+}
+// Brief message pinned to the top of the screen so save results aren't missed
+// on long pages or phones. Click to dismiss. (The inline status line stays,
+// and is what screen readers announce.)
+function showToast(message, isError) {
+    const host = $("toast-host");
+    if (!host) { return; }
+    while (host.children.length >= 3) { host.removeChild(host.firstChild); }
+    const t = document.createElement("div");
+    t.className = "toast " + (isError ? "error" : "ok");
+    t.textContent = message;
+    const close = function () {
+        if (!t.parentNode) { return; }
+        t.classList.add("leaving");
+        setTimeout(function () { if (t.parentNode) { t.parentNode.removeChild(t); } }, 300);
+    };
+    t.addEventListener("click", close);
+    host.appendChild(t);
+    setTimeout(close, isError ? 8000 : 4000);
 }
 function show(id) { const el = $(id); if (el) { el.hidden = false; } }
 function hide(id) { const el = $(id); if (el) { el.hidden = true; } }
@@ -470,6 +528,14 @@ function renderEventGroup(container, heading, events, upcoming) {
         wrap.appendChild(cb); wrap.appendChild(span);
         const row = document.createElement("div"); row.className = "attend-row";
         row.appendChild(wrap); row.appendChild(note); card.appendChild(row);
+        {
+            const lb = document.createElement("button");
+            lb.type = "button"; lb.className = "secondary small log-btn"; lb.dataset.eventId = ev.id;
+            lb.textContent = "Log hours";
+            lb.setAttribute("aria-label", "Log hours for " + ev.name);
+            lb.addEventListener("click", function () { goLogHours(ev.id); });
+            card.appendChild(lb);
+        }
         if (!profileComplete(me)) {
             const hint = document.createElement("div");
             hint.className = "event-meta hint-warn";
@@ -580,16 +646,72 @@ async function onLogHours(event) {
     const hours = Number($("hours-input").value);
     const travel = Number($("travel-input").value || 0);
     const notes = $("hours-notes").value.trim();
+    const type = $("hours-type").value;
     if (!eventId) { setStatus("hours-status", "Select an event.", true); return; }
-    if (!(hours > 0 && hours <= 24)) { setStatus("hours-status", "Event hours must be between 0 and 24.", true); return; }
+    if (!(hours > 0 && hours <= 24)) { setStatus("hours-status", "Hours must be between 0 and 24.", true); return; }
     if (travel < 0 || travel > 24) { setStatus("hours-status", "Travel hours must be between 0 and 24.", true); return; }
+    if (needsNote(type, notes)) { setStatus("hours-status", "Add a note describing the work when the type is Other.", true); $("hours-notes").focus(); return; }
+    const existing = myEntry(eventId, type);
+    if (existing && !confirmReplace("You", existing, eventId, hours, travel, type)) {
+        setStatus("hours-status", "Not saved. Your earlier entry was kept.", true); return;
+    }
     try {
-        await logVolunteerHours(eventId, hours, travel, notes);
-        $("hours-form").reset();          // clear event, hours, travel and notes
+        await logVolunteerHours(eventId, hours, travel, notes, type);
+        $("hours-form").reset();          // clear event, type (back to Event Day), hours, travel and notes
+        syncNoteRequired($("hours-type"), $("hours-notes"), $("hours-notes-label"));
         updateTotalPreview();             // reset the "Total" display to 0
         setStatus("hours-status", "Hours logged.", false);
         await loadHours();
     } catch (err) { setStatus("hours-status", err.message, true); }
+}
+function myEntry(eventId, type) {
+    return (memberStats.allRows || []).filter(function (r) {
+        return r.event_id === eventId && (r.hour_type || DEFAULT_HOUR_TYPE) === type; })[0];
+}
+// When the event or type changes, say if an entry of that type already exists.
+function onLogChoiceChange() {
+    syncNoteRequired($("hours-type"), $("hours-notes"), $("hours-notes-label"));
+    const eventId = $("event-select").value, type = $("hours-type").value;
+    const ex = eventId ? myEntry(eventId, type) : null;
+    if (ex) { setInfo("hours-status", "You already logged " + fmtNum(ex.hours) + " " + type + " hours for this event. Saving will replace them."); }
+    else if ($("hours-status").className.indexOf("info") >= 0) { setStatus("hours-status", "", false); }
+}
+// "You already logged ... Replace?" Returns true if it's OK to save.
+function confirmReplace(who, existing, eventId, hours, travel, type) {
+    const evName = eventName(eventId);
+    const self = who === "You";
+    type = type || DEFAULT_HOUR_TYPE;
+    return window.confirm(who + (self ? " already logged " : " already has ") + fmtNum(existing.hours) + " " + type + " hours"
+        + (Number(existing.travel_time) > 0 ? " + " + fmtNum(existing.travel_time) + " travel" : "")
+        + (self ? "" : " logged") + " for \u201c" + evName + "\u201d.\n\nReplace that entry with " + fmtNum(hours) + " hours"
+        + (travel > 0 ? " + " + fmtNum(travel) + " travel" : "") + "?");
+}
+function eventName(eventId) {
+    const list = (memberEvents || []).concat(eventsCache || []);
+    const ev = list.filter(function (e) { return e.id === eventId; })[0];
+    return ev ? ev.name : "this event";
+}
+// Jump to the Log hours form with an event chosen (from an event card or the
+// QR check-in banner). Type starts at Event Day; an existing Event Day entry
+// is filled in.
+function goLogHours(eventId) {
+    const sel = $("event-select");
+    const ok = Array.prototype.some.call(sel.options, function (o) { return o.value === eventId; });
+    $("sec-log").scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!ok) { setStatus("hours-status", "That event isn't available for logging.", true); return; }
+    sel.value = eventId;
+    $("hours-type").value = DEFAULT_HOUR_TYPE;
+    const existing = myEntry(eventId, DEFAULT_HOUR_TYPE);
+    if (existing) {
+        $("hours-input").value = existing.hours; $("travel-input").value = existing.travel_time;
+        $("hours-notes").value = existing.notes || "";
+    } else {
+        $("hours-input").value = ""; $("travel-input").value = ""; $("hours-notes").value = "";
+        setStatus("hours-status", "", false);
+    }
+    onLogChoiceChange();
+    updateTotalPreview();
+    setTimeout(function () { $("hours-input").focus(); }, 400);
 }
 async function loadHours() {
     if (!myMemberId) { return; }
@@ -610,12 +732,15 @@ function renderHoursView() {
         const tr = document.createElement("tr");
         tr.dataset.travel = String(Number(r.travel_time) > 0 ? 1 : 0);
         tr.dataset.notes = r.notes ? "1" : "0";
+        tr.dataset.type = r.hour_type || DEFAULT_HOUR_TYPE;
         addCell(tr, r.events ? fmtDate(r.events.start_at) : "");
         addCell(tr, r.events ? r.events.name : "");
+        addCell(tr, r.hour_type || DEFAULT_HOUR_TYPE);
         addCell(tr, String(r.hours));
         addCell(tr, String(r.travel_time));
         addCell(tr, String(r.total_hours));
         addCell(tr, r.notes || "");
+        addMyHoursActions(tr, r);
         tbody.appendChild(tr);
     }
     tfRefresh("hours");
@@ -627,7 +752,7 @@ function renderHoursView() {
 // ADMIN VIEW
 // =====================================================================
 async function loadMembers() {
-    try { allMembers = await adminFetchAllMembers(); applyView(); renderAdminDash(); }
+    try { allMembers = await adminFetchAllMembers(); applyView(); renderAdminDash(); renderDupes(); }
     catch (err) { setStatus("members-status", err.message, true); }
 }
 function applyView() {
@@ -658,15 +783,108 @@ function applyView() {
     if (pageIndex < 0) { pageIndex = 0; }
     renderMembers(); renderPager(); updateSortIndicators(); renderMemberFilters();
 }
+// ---- Possible duplicate profiles ------------------------------------
+// Groups (non-archived) people who share a 10-digit phone, a full name, or
+// the name part of their email (ignoring dots and +tags).
+function findDuplicates(list) {
+    const people = list.filter(function (m) { return !m.archived; });
+    const parent = {};
+    const find = function (x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    people.forEach(function (m) { parent[m.id] = m.id; });
+    const reasons = {};          // root-agnostic: pair reasons recorded per key
+    const keyMaps = { phone: {}, name: {}, email: {} };
+    const keyLabel = { phone: "Same phone", name: "Same name", email: "Similar email" };
+    people.forEach(function (m) {
+        const keys = [];
+        const ph = String(m.phone || "").replace(/\D/g, "").slice(-10);
+        if (ph.length === 10) { keys.push(["phone", ph]); }
+        const nm = [m.first_name, m.last_name].map(function (x) { return String(x || "").trim().toLowerCase(); });
+        if (nm[0] && nm[1]) { keys.push(["name", nm[0] + " " + nm[1]]); }
+        const local = String(m.email || "").toLowerCase().split("@")[0].split("+")[0].replace(/\./g, "");
+        if (local.length >= 5) { keys.push(["email", local]); }
+        keys.forEach(function (k) {
+            const map = keyMaps[k[0]];
+            if (map[k[1]]) {
+                const a = find(map[k[1]]), b = find(m.id);
+                if (a !== b) { parent[b] = a; }
+                reasons[m.id] = (reasons[m.id] || {}); reasons[m.id][k[0]] = true;
+                reasons[map[k[1]]] = (reasons[map[k[1]]] || {}); reasons[map[k[1]]][k[0]] = true;
+            } else { map[k[1]] = m.id; }
+        });
+    });
+    const groups = {};
+    people.forEach(function (m) { const r = find(m.id); (groups[r] = groups[r] || []).push(m); });
+    return Object.keys(groups).map(function (k) { return groups[k]; })
+        .filter(function (g) { return g.length > 1; })
+        .map(function (g) {
+            const why = {};
+            g.forEach(function (m) { Object.keys(reasons[m.id] || {}).forEach(function (r) { why[r] = true; }); });
+            return { people: g, why: Object.keys(why).map(function (r) { return keyLabel[r]; }) };
+        });
+}
+function renderDupes() {
+    const box = $("dupes");
+    if (!box) { return; }
+    const groups = findDuplicates(allMembers);
+    box.hidden = groups.length === 0;
+    $("dupes-summary").textContent = "Possible duplicates (" + groups.length + (groups.length === 1 ? " group)" : " groups)");
+    const body = $("dupes-body"); body.innerHTML = "";
+    groups.slice(0, 100).forEach(function (g) {
+        const div = document.createElement("div"); div.className = "dupe-group";
+        const why = document.createElement("div"); why.className = "dupe-why"; why.textContent = g.why.join(" \u00b7 ");
+        div.appendChild(why);
+        g.people.forEach(function (m) {
+            const row = document.createElement("div"); row.className = "dupe-person";
+            const label = document.createElement("span");
+            label.textContent = memberLabel(m) + (m.phone ? " \u00b7 " + m.phone : "")
+                + " \u00b7 " + fmtNum(m.total_hours) + " hrs" + (m.auth_user_id ? " \u00b7 has login" : "");
+            const b = document.createElement("button");
+            b.type = "button"; b.className = "secondary small"; b.textContent = "Open (keep this one)";
+            b.setAttribute("aria-label", "Open " + (m.full_name || m.email) + " to keep and merge others into");
+            b.addEventListener("click", function () {
+                selectMember(m);
+                const other = g.people.filter(function (x) { return x.id !== m.id; })[0];
+                if (other) { $("merge-search").value = other.email; onMergeSearch(); }
+                $("edit-form").scrollIntoView({ behavior: "smooth", block: "start" });
+            });
+            row.appendChild(label); row.appendChild(b); div.appendChild(row);
+        });
+        body.appendChild(div);
+    });
+}
 function needsAttention(m) {
     return !!m.is_member && (m.membership_status === "lapsed" || m.membership_status === "suspended");
+}
+// Recurring members whose renewal date is within RENEWAL_WINDOW_DAYS (or past).
+function renewalDue(m) {
+    if (!m.is_member || m.archived || m.membership_type !== "recurring" || !m.next_renewal_date) { return false; }
+    const limit = dateKey(new Date(Date.now() + RENEWAL_WINDOW_DAYS * DAY_MS).toISOString());
+    return String(m.next_renewal_date).slice(0, 10) <= limit;
+}
+function daysUntil(dayKey) {
+    const today = dateKey(new Date().toISOString());
+    const a = Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10));
+    const b = Date.UTC(+dayKey.slice(0, 4), +dayKey.slice(5, 7) - 1, +dayKey.slice(8, 10));
+    return Math.round((b - a) / DAY_MS);
+}
+function onExportRenewals() {
+    const rows = allMembers.filter(renewalDue).sort(function (a, b) {
+        return String(a.next_renewal_date) < String(b.next_renewal_date) ? -1 : 1; });
+    const cols = ["name", "email", "phone", "membership_status", "tier", "next_renewal_date", "days_until_renewal"];
+    downloadFile("renewals-due.csv", rowsToCsv(cols, rows, function (m) {
+        const d = String(m.next_renewal_date).slice(0, 10);
+        return [m.full_name || "", m.email, m.phone || "", m.membership_status, m.tier || "", d, daysUntil(d)];
+    }));
+    setStatus("members-status", "Exported " + rows.length + " renewals due in the next " + RENEWAL_WINDOW_DAYS
+        + " days (including overdue).", false);
 }
 const MEMBER_FILTERS = {
     all:       { label: "All",             test: function () { return true; } },
     members:   { label: "Members",         test: function (m) { return !!m.is_member; } },
     nonmember: { label: "Non-members",     test: function (m) { return !m.is_member; } },
     active:    { label: "Active",          test: function (m) { return !!m.is_member && m.membership_status === "active"; } },
-    attention: { label: "Needs attention", test: needsAttention }
+    attention: { label: "Needs attention", test: needsAttention },
+    renewals:  { label: "Renewal due (" + RENEWAL_WINDOW_DAYS + " days)", test: renewalDue }
 };
 function renderMemberFilters() {
     const host = $("members-filters");
@@ -899,12 +1117,12 @@ async function onExportHours() {
     try {
         const rows = await adminFetchAllHours();
         const cols = ["name", "email", "is_member", "event", "event_start (" + EVENT_TZ + ")",
-            "event_location", "event_hours", "travel_hours", "total_hours", "notes"];
+            "event_location", "hours_type", "hours", "travel_hours", "total_hours", "notes"];
         downloadFile("hours.csv", rowsToCsv(cols, rows, function (r) {
             const m = r.members || {}, e = r.events || {};
             const name = [m.first_name, m.last_name].filter(Boolean).join(" ");
             return [name, m.email || "", m.is_member ? "yes" : "no", e.name || "",
-                fmtCsvDT(e.start_at), e.location || "", r.hours, r.travel_time, r.total_hours, r.notes || ""];
+                fmtCsvDT(e.start_at), e.location || "", r.hour_type || DEFAULT_HOUR_TYPE, r.hours, r.travel_time, r.total_hours, r.notes || ""];
         }));
         setStatus("members-status", "Exported " + rows.length + " hour entries.", false);
     } catch (err) { setStatus("members-status", err.message, true); }
@@ -1072,11 +1290,12 @@ function populateEventSelects(events) {
         // Blank first choice on the single-entry form so clearing it never
         // silently points at an event.
         if (targets[t] === "log-event-select") { addBlankOption(sel, "Select an event\u2026"); }
-        const n = Math.min(events.length, MAX_ROWS);
+        const list = events;
+        const n = Math.min(list.length, MAX_ROWS);
         for (let i = 0; i < n; i += 1) {
             const opt = document.createElement("option");
-            opt.value = events[i].id;
-            opt.textContent = events[i].name + " (" + fmtDT(events[i].start_at) + ")";
+            opt.value = list[i].id;
+            opt.textContent = list[i].name + " (" + fmtDT(list[i].start_at) + ")";
             sel.appendChild(opt);
         }
         restoreSelection(sel, keep);
@@ -1176,27 +1395,97 @@ async function onDeleteEventConfirm() {
 }
 
 // ---- Summary -------------------------------------------------------
+// Period filter for the Volunteer hours tab (by event date).
+const sumRange = { kind: "all", year: null, from: "", to: "" };
+function summaryAsRows(list) { return list.map(function (r) { return Object.assign({ events: { start_at: r.start_at } }, r); }); }
+function summaryInRange() { return rowsInRange(summaryAsRows(summaryRows), sumRange); }
 async function loadSummary() {
     try {
-        const rows = await adminEventHoursSummary();
-        const tbody = $("summary-body"); tbody.innerHTML = "";
-        summaryRows = rows;
-        const n = Math.min(rows.length, MAX_ROWS);
-        for (let i = 0; i < n; i += 1) {
-            const r = rows[i];
-            const tr = document.createElement("tr");
-            const flagged = Number(r.attended_count) > 0 && !(Number(r.total_hours) > 0);
-            tr.dataset.flag = flagged ? "1" : "0";
-            tr.dataset.hours = String(Number(r.total_hours) > 0 ? 1 : 0);
-            if (flagged) { tr.classList.add("flag"); }
-            addCell(tr, r.event_name); addCell(tr, fmtDT(r.start_at));
-            addCell(tr, r.location || ""); addCell(tr, String(r.rsvp_count || 0));
-            addCell(tr, String(r.attended_count));
-            addCell(tr, String(r.member_count)); addCell(tr, String(r.total_hours));
-            tbody.appendChild(tr);
-        }
-        tfRefresh("summary");
+        summaryRows = await adminEventHoursSummary();
+        fillRangeOptions($("sum-range"), yearsOf(summaryAsRows(summaryRows)), true, sumRange);
+        renderSummary();
         renderAdminDash();
+    } catch (err) { setStatus("summary-status", err.message, true); }
+}
+function onSumRangeChange() {
+    const sel = $("sum-range");
+    $("sum-custom").hidden = sel.value !== "custom";
+    if (sel.value === "custom" && !$("sum-from").value && !$("sum-to").value) {
+        const today = dateKey(new Date().toISOString());
+        $("sum-from").value = today.slice(0, 4) + "-01-01"; $("sum-to").value = today;
+    }
+    const r = rangeFromSelect(sel.value, $("sum-from").value, $("sum-to").value);
+    sumRange.kind = r.kind; sumRange.year = r.year; sumRange.from = r.from; sumRange.to = r.to;
+    renderSummary();
+}
+function renderSummary() {
+    const rows = summaryInRange();
+    const tbody = $("summary-body"); tbody.innerHTML = "";
+    const t = summaryTotals(rows);
+    $("sum-totals").textContent = rangeLabel(sumRange) + ": " + rows.length + (rows.length === 1 ? " event" : " events")
+        + " \u00b7 " + t.entries + (t.entries === 1 ? " hours entry" : " hours entries")
+        + " \u00b7 " + t.att + (t.att === 1 ? " check-in" : " check-ins") + " \u00b7 "
+        + fmtNum(t.hrs) + " total hours incl. travel (Event Day " + fmtNum(t.day) + ", Administrative Work "
+        + fmtNum(t.admin) + ", Other " + fmtNum(t.other) + ")";
+    const n = Math.min(rows.length, MAX_ROWS);
+    for (let i = 0; i < n; i += 1) {
+        const r = rows[i];
+        const tr = document.createElement("tr");
+        const flagged = Number(r.attended_count) > 0 && !(Number(r.total_hours) > 0);
+        tr.dataset.flag = flagged ? "1" : "0";
+        tr.dataset.hours = String(Number(r.total_hours) > 0 ? 1 : 0);
+        if (flagged) { tr.classList.add("flag"); }
+        addCell(tr, r.event_name); addCell(tr, fmtDT(r.start_at));
+        addCell(tr, r.location || ""); addCell(tr, String(r.rsvp_count || 0));
+        addCell(tr, String(r.attended_count));
+        addCell(tr, String(r.member_count));
+        addCell(tr, fmtNum(r.event_day_hours)); addCell(tr, fmtNum(r.admin_hours)); addCell(tr, fmtNum(r.other_hours));
+        addCell(tr, String(r.total_hours));
+        tbody.appendChild(tr);
+    }
+    tfRefresh("summary");
+}
+function summaryTotals(rows) {
+    const t = { hrs: 0, entries: 0, people: 0, att: 0, rsvp: 0, day: 0, admin: 0, other: 0 };
+    rows.forEach(function (r) {
+        t.hrs += Number(r.total_hours) || 0;
+        // entry_count is new; fall back to member_count if the database hasn't been updated yet.
+        t.entries += Number(r.entry_count !== undefined ? r.entry_count : r.member_count) || 0;
+        t.people += Number(r.member_count) || 0; t.att += Number(r.attended_count) || 0;
+        t.rsvp += Number(r.rsvp_count) || 0; t.day += Number(r.event_day_hours) || 0;
+        t.admin += Number(r.admin_hours) || 0; t.other += Number(r.other_hours) || 0;
+    });
+    return t;
+}
+function rangeFileTag() { return rangeLabel(sumRange).replace(/[^0-9A-Za-z]+/g, "-").replace(/^-|-$/g, "").toLowerCase(); }
+function onExportSummary() {
+    const rows = sortByEventDate(summaryInRange(), false);
+    const cols = ["event", "event_start (" + EVENT_TZ + ")", "location", "rsvp", "attended", "people_logged",
+        "hours_entries", "event_day_hours", "administrative_work_hours", "other_hours", "total_hours"];
+    const t = summaryTotals(rows);
+    const withTotal = rows.concat([{ __total: true }]);
+    downloadFile("event-summary-" + rangeFileTag() + ".csv", rowsToCsv(cols, withTotal, function (r) {
+        if (r.__total) { return ["TOTAL (" + rangeLabel(sumRange) + ")", "", "", t.rsvp, t.att, "", t.entries,
+            fmtNum(t.day), fmtNum(t.admin), fmtNum(t.other), fmtNum(t.hrs)]; }
+        return [r.event_name, fmtCsvDT(r.start_at), r.location || "", r.rsvp_count || 0, r.attended_count || 0,
+            r.member_count || 0, r.entry_count !== undefined ? r.entry_count : r.member_count,
+            fmtNum(r.event_day_hours), fmtNum(r.admin_hours), fmtNum(r.other_hours), r.total_hours];
+    }));
+    setStatus("summary-status", "Exported " + rows.length + (rows.length === 1 ? " event" : " events") + " for " + rangeLabel(sumRange) + ".", false);
+}
+async function onExportSummaryEntries() {
+    try {
+        const all = await adminFetchAllHours();
+        const rows = sortByEventDate(rowsInRange(all, sumRange), false);
+        const cols = ["name", "email", "is_member", "event", "event_start (" + EVENT_TZ + ")",
+            "event_location", "hours_type", "hours", "travel_hours", "total_hours", "notes"];
+        downloadFile("hours-" + rangeFileTag() + ".csv", rowsToCsv(cols, rows, function (r) {
+            const m = r.members || {}, e = r.events || {};
+            const name = [m.first_name, m.last_name].filter(Boolean).join(" ");
+            return [name, m.email || "", m.is_member ? "yes" : "no", e.name || "",
+                fmtCsvDT(e.start_at), e.location || "", r.hour_type || DEFAULT_HOUR_TYPE, r.hours, r.travel_time, r.total_hours, r.notes || ""];
+        }));
+        setStatus("summary-status", "Exported " + rows.length + " hour entries for " + rangeLabel(sumRange) + ".", false);
     } catch (err) { setStatus("summary-status", err.message, true); }
 }
 async function refreshDerived() { await Promise.all([loadSummary(), loadMembers()]); }
@@ -1205,8 +1494,9 @@ async function refreshDerived() { await Promise.all([loadSummary(), loadMembers(
 async function loadTools() {
     try {
         if (!allMembers.length) { allMembers = await adminFetchAllMembers(); }
-        const active = allMembers.filter(function (m) { return !m.archived; });  // no archived in logging tools
-        populateMemberSelect("log-member-select", active);
+        // Keep the chosen person only if they still exist and aren't archived.
+        const chosen = $("log-member-select").value;
+        if (chosen && !allMembers.some(function (m) { return m.id === chosen && !m.archived; })) { clearLogMember(); }
         renderBulkRows();
     } catch (err) { setStatus("bulk-status", err.message, true); }
 }
@@ -1219,19 +1509,57 @@ function addBlankOption(sel, label) {
     opt.value = ""; opt.textContent = label;
     sel.appendChild(opt);
 }
-function populateMemberSelect(selectId, members) {
-    const sel = $(selectId);
-    if (!sel) { return; }
-    const keep = sel.value;
-    sel.innerHTML = "";
-    addBlankOption(sel, "Select a person\u2026");
-    const n = Math.min(members.length, MAX_ROWS);
-    for (let i = 0; i < n; i += 1) {
-        const opt = document.createElement("option");
-        opt.value = members[i].id; opt.textContent = memberLabel(members[i]);
-        sel.appendChild(opt);
+// ---- Admin "Log hours for a person": type-ahead person picker ----------
+function onLogMemberSearch() {
+    $("log-member-select").value = "";               // typing again means choosing again
+    $("log-member-chosen").textContent = "";
+    const results = $("log-member-results"); results.innerHTML = "";
+    const term = $("log-member-search").value.trim().toLowerCase();
+    if (!term) { return; }
+    let shown = 0;
+    for (let i = 0; i < allMembers.length && shown < 20; i += 1) {
+        const m = allMembers[i];
+        if (m.archived) { continue; }
+        const hay = ((m.full_name || "") + " " + m.email + " " + (m.phone || "")).toLowerCase();
+        if (hay.indexOf(term) < 0) { continue; }
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "result"; b.setAttribute("role", "option");
+        b.textContent = memberLabel(m);
+        b.addEventListener("click", function () { chooseLogMember(m); });
+        b.addEventListener("keydown", onResultKey);
+        results.appendChild(b);
+        shown += 1;
     }
-    restoreSelection(sel, keep);
+    if (shown === 0) {
+        const d = document.createElement("div"); d.className = "no-match"; d.textContent = "No matches";
+        results.appendChild(d);
+    }
+}
+// Arrow keys move through results; Escape closes them.
+function onResultKey(e) {
+    const t = e.currentTarget;
+    if (e.key === "ArrowDown" && t.nextElementSibling) { e.preventDefault(); t.nextElementSibling.focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); (t.previousElementSibling || $("log-member-search")).focus(); }
+    else if (e.key === "Escape") { $("log-member-results").innerHTML = ""; $("log-member-search").focus(); }
+}
+function onLogMemberSearchKey(e) {
+    const first = $("log-member-results").querySelector("button.result");
+    if (e.key === "ArrowDown" && first) { e.preventDefault(); first.focus(); }
+    else if (e.key === "Enter" && first && !$("log-member-select").value) { e.preventDefault(); first.click(); }
+    else if (e.key === "Escape") { $("log-member-results").innerHTML = ""; }
+}
+function chooseLogMember(m) {
+    $("log-member-select").value = m.id;
+    $("log-member-search").value = m.full_name || m.email;
+    $("log-member-results").innerHTML = "";
+    const c = $("log-member-chosen"); c.textContent = "";
+    const strong = document.createElement("strong"); strong.textContent = "Selected: ";
+    c.appendChild(strong); c.appendChild(document.createTextNode(memberLabel(m)));
+    $("log-event-select").focus();
+}
+function clearLogMember() {
+    $("log-member-select").value = ""; $("log-member-search").value = "";
+    $("log-member-results").innerHTML = ""; $("log-member-chosen").textContent = "";
 }
 function updateLogTotalPreview() {
     const h = Number($("log-hours-input").value) || 0;
@@ -1244,12 +1572,21 @@ async function onLogForMember(event) {
     const hours = Number($("log-hours-input").value);
     const travel = Number($("log-travel-input").value || 0);
     const notes = $("log-notes-input").value.trim();
-    if (!memberId || !eventId) { setStatus("log-status", "Select a person and an event.", true); return; }
-    if (!(hours > 0 && hours <= 24)) { setStatus("log-status", "Event hours must be between 0 and 24.", true); return; }
+    const type = $("log-type").value;
+    if (!memberId) { setStatus("log-status", "Search for a person and pick them from the list.", true); return; }
+    if (!eventId) { setStatus("log-status", "Select an event.", true); return; }
+    if (!(hours > 0 && hours <= 24)) { setStatus("log-status", "Hours must be between 0 and 24.", true); return; }
     if (travel < 0 || travel > 24) { setStatus("log-status", "Travel hours must be between 0 and 24.", true); return; }
+    if (needsNote(type, notes)) { setStatus("log-status", "Add a note describing the work when the type is Other.", true); $("log-notes-input").focus(); return; }
     try {
-        await adminLogHoursFor(memberId, eventId, hours, travel, notes);
-        $("log-form").reset();            // clear person, event, hours, travel and notes
+        const existing = await adminGetHoursEntry(memberId, eventId, type);
+        if (existing && !confirmReplace(memberName(memberId), existing, eventId, hours, travel, type)) {
+            setStatus("log-status", "Not saved. The earlier entry was kept.", true); return;
+        }
+        await adminLogHoursFor(memberId, eventId, hours, travel, notes, type);
+        $("log-form").reset();            // clear person, event, type, hours, travel and notes
+        clearLogMember();                 // hidden person id isn't cleared by reset()
+        syncNoteRequired($("log-type"), $("log-notes-input"), $("log-notes-label"));
         updateLogTotalPreview();          // reset the "Total" display to 0
         setStatus("log-status", "Hours saved.", false);
         await refreshDerived();
@@ -1321,12 +1658,22 @@ function renderBulkRows() {
         aTd.appendChild(del); tr.appendChild(aTd);
         tbody.appendChild(tr);
     }
+    if ($("bulk-type")) { onBulkTypeChange(); }      // re-apply "notes required" to new rows
+}
+function onBulkTypeChange() {
+    const other = $("bulk-type").value === "Other";
+    $("bulk-type-note").hidden = !other;
+    const notes = $("bulk-body").querySelectorAll(".bulk-notes");
+    for (let i = 0; i < notes.length; i += 1) {
+        notes[i].required = other; notes[i].placeholder = other ? "Required for Other" : "";
+    }
 }
 async function onBulkSubmit(event) {
     event.preventDefault();
     const eventId = $("bulk-event-select").value;
     if (!eventId) { setStatus("bulk-status", "Select an event.", true); return; }
     if (bulkRows.length === 0) { setStatus("bulk-status", "Add at least one person.", true); return; }
+    const type = $("bulk-type").value;
     const rows = $("bulk-body").querySelectorAll("tr");
     const entries = [];
     const limit = Math.min(rows.length, MAX_ROWS);
@@ -1334,12 +1681,33 @@ async function onBulkSubmit(event) {
         const hours = Number(rows[i].querySelector(".bulk-hours").value);
         const travel = Number(rows[i].querySelector(".bulk-travel").value || 0);
         const notesEl = rows[i].querySelector(".bulk-notes");
-        if (!(hours > 0 && hours <= 24)) { setStatus("bulk-status", "Row " + (i + 1) + ": event hours must be 0-24.", true); return; }
+        if (!(hours > 0 && hours <= 24)) { setStatus("bulk-status", "Row " + (i + 1) + ": hours must be 0-24.", true); return; }
         if (travel < 0 || travel > 24) { setStatus("bulk-status", "Row " + (i + 1) + ": travel must be 0-24.", true); return; }
+        if (needsNote(type, notesEl ? notesEl.value : "")) {
+            setStatus("bulk-status", "Row " + (i + 1) + ": add a note (required when the type is Other).", true);
+            if (notesEl) { notesEl.focus(); } return; }
         entries.push({ member_id: rows[i].dataset.memberId, hours: hours, travel: travel,
-            notes: notesEl ? notesEl.value.trim() : "" });
+            notes: notesEl ? notesEl.value.trim() : "", hour_type: type });
     }
     try {
+        // Warn before replacing anyone's existing entry for this event.
+        const existing = await adminListHoursForEvent(eventId);
+        const byMember = {};
+        (existing || []).forEach(function (r) {
+            if ((r.hour_type || DEFAULT_HOUR_TYPE) === type) { byMember[r.member_id] = r; } });
+        const clashes = entries.filter(function (e) { return byMember[e.member_id]; });
+        if (clashes.length) {
+            const lines = clashes.slice(0, 10).map(function (e) {
+                const r = byMember[e.member_id];
+                return "\u2022 " + memberName(e.member_id) + ": " + fmtNum(r.total_hours) + " hrs now \u2192 "
+                    + fmtNum(e.hours + e.travel) + " hrs";
+            });
+            if (clashes.length > 10) { lines.push("\u2022 \u2026and " + (clashes.length - 10) + " more"); }
+            const msg = clashes.length + (clashes.length === 1 ? " person already has" : " people already have")
+                + " " + type + " hours for \u201c" + eventName(eventId) + "\u201d:\n\n" + lines.join("\n")
+                + "\n\nReplace their existing entries?";
+            if (!window.confirm(msg)) { setStatus("bulk-status", "Not saved. Nothing was changed.", true); return; }
+        }
         const count = await adminBulkLogHours(eventId, entries);
         setStatus("bulk-status", "Saved " + count + " entries.", false);
         bulkRows = []; renderBulkRows();
@@ -1365,11 +1733,15 @@ function renderEntries(rows) {
         const r = rows[i], who = r.members || {};
         const tr = document.createElement("tr");
         tr.dataset.notes = r.notes ? "1" : "0";
+        tr.dataset.type = r.hour_type || DEFAULT_HOUR_TYPE;
         addCell(tr, who.full_name || ""); addCell(tr, who.email || "");
+        const tyTd = document.createElement("td");
+        const tySel = makeTypeSelect(r.hour_type, "Type of hours for " + (who.full_name || who.email || "entry"));
+        tyTd.appendChild(tySel); tr.appendChild(tyTd);
         const hTd = document.createElement("td");
         const hIn = document.createElement("input");
         hIn.type = "number"; hIn.step = "0.25"; hIn.min = "0"; hIn.max = "24";
-        hIn.value = String(r.hours); hIn.className = "entry-hours"; hIn.setAttribute("aria-label", "Event hours for " + (who.full_name || who.email || "entry"));
+        hIn.value = String(r.hours); hIn.className = "entry-hours"; hIn.setAttribute("aria-label", "Hours for " + (who.full_name || who.email || "entry"));
         hTd.appendChild(hIn); tr.appendChild(hTd);
         const tTd = document.createElement("td");
         const tIn = document.createElement("input");
@@ -1386,7 +1758,9 @@ function renderEntries(rows) {
         const wrap = document.createElement("div"); wrap.className = "row-actions";
         const saveBtn = document.createElement("button");
         saveBtn.type = "button"; saveBtn.className = "small"; saveBtn.textContent = "Save";
-        saveBtn.addEventListener("click", function () { onSaveEntry(r.id, hIn, tIn, nIn); });
+        tySel.addEventListener("change", function () { syncNoteRequired(tySel, nIn, null); });
+        syncNoteRequired(tySel, nIn, null);
+        saveBtn.addEventListener("click", function () { onSaveEntry(r.id, hIn, tIn, nIn, tySel); });
         const delBtn = document.createElement("button");
         delBtn.type = "button"; delBtn.className = "small danger"; delBtn.textContent = "Delete";
         delBtn.addEventListener("click", function () { onDeleteEntry(r.id, tr); });
@@ -1396,17 +1770,19 @@ function renderEntries(rows) {
     }
     tfRefresh("manage");
 }
-async function onSaveEntry(entryId, hoursInput, travelInput, notesInput) {
+async function onSaveEntry(entryId, hoursInput, travelInput, notesInput, typeInput) {
     const hours = Number(hoursInput.value), travel = Number(travelInput.value || 0);
-    if (!(hours > 0 && hours <= 24)) { setStatus("manage-status", "Event hours must be between 0 and 24.", true); return; }
+    const type = typeInput ? typeInput.value : DEFAULT_HOUR_TYPE;
+    if (!(hours > 0 && hours <= 24)) { setStatus("manage-status", "Hours must be between 0 and 24.", true); return; }
     if (travel < 0 || travel > 24) { setStatus("manage-status", "Travel hours must be between 0 and 24.", true); return; }
+    if (needsNote(type, notesInput.value)) { setStatus("manage-status", "Add a note describing the work when the type is Other.", true); notesInput.focus(); return; }
     try {
         await adminUpdateHoursEntry(entryId, { hours: hours, travel_time: travel,
-            notes: notesInput.value.trim() || null });
+            notes: notesInput.value.trim() || null, hour_type: type });
         setStatus("manage-status", "Entry updated.", false);
         await refreshDerived();
         await onLoadEntries({ preventDefault: function () {} });
-    } catch (err) { setStatus("manage-status", err.message, true); }
+    } catch (err) { setStatus("manage-status", friendlyError(err), true); }
 }
 async function onDeleteEntry(entryId, rowEl) {
     if (!window.confirm("Delete this hours entry? This cannot be undone.")) { return; }
@@ -1491,8 +1867,10 @@ const TF_CFG = {
     hours: { tbody: "hours-body", search: "hours-search", filters: "hours-filters", count: "hours-count",
         list: [
             { key: "all", label: "All", test: function () { return true; } },
-            { key: "travel", label: "With travel", test: function (tr) { return tr.dataset.travel === "1"; } },
-            { key: "notes", label: "With notes", test: function (tr) { return tr.dataset.notes === "1"; } }] },
+            { key: "eventday", label: "Event Day", test: function (tr) { return tr.dataset.type === "Event Day"; } },
+            { key: "admin", label: "Administrative Work", test: function (tr) { return tr.dataset.type === "Administrative Work"; } },
+            { key: "other", label: "Other", test: function (tr) { return tr.dataset.type === "Other"; } },
+            { key: "travel", label: "With travel", test: function (tr) { return tr.dataset.travel === "1"; } }] },
     events: { tbody: "events-body", search: "events-search", filters: "events-filters", count: "events-count",
         list: [
             { key: "all", label: "All", test: function () { return true; } },
@@ -1513,6 +1891,9 @@ const TF_CFG = {
     manage: { tbody: "manage-body", search: "manage-search", filters: "manage-filters", count: "manage-count",
         list: [
             { key: "all", label: "All", test: function () { return true; } },
+            { key: "eventday", label: "Event Day", test: function (tr) { return tr.dataset.type === "Event Day"; } },
+            { key: "admin", label: "Administrative Work", test: function (tr) { return tr.dataset.type === "Administrative Work"; } },
+            { key: "other", label: "Other", test: function (tr) { return tr.dataset.type === "Other"; } },
             { key: "notes", label: "With notes", test: function (tr) { return tr.dataset.notes === "1"; } }] }
 };
 function initTableFilters() {
@@ -1662,6 +2043,8 @@ function renderAdminDash() {
         { label: "Members", value: String(members.length), sub: active.length + " active", tone: "ok" },
         { label: "Needs attention", value: String(attention.length), sub: "Lapsed or suspended",
           tone: attention.length ? "warn" : "ok" },
+        { label: "Renewals due", value: String(people.filter(renewalDue).length),
+          sub: "Next " + RENEWAL_WINDOW_DAYS + " days or overdue", tone: people.some(renewalDue) ? "warn" : "ok" },
         { label: "Volunteer hours", value: fmtNum(hours), sub: "All events" },
         { label: "Events", value: String(summaryRows.length) }
     ]);
@@ -1776,6 +2159,85 @@ function onHoursRangeChange() {
     renderHoursView();
 }
 
+// ---- Edit / delete your own entries (within SELF_EDIT_DAYS of the event) -
+function canSelfEdit(r) {
+    const start = r.events ? new Date(r.events.start_at).getTime() : NaN;
+    return !isNaN(start) && start >= Date.now() - SELF_EDIT_DAYS * DAY_MS;
+}
+function addMyHoursActions(tr, r) {
+    const td = document.createElement("td");
+    if (!canSelfEdit(r)) {
+        td.textContent = "Ask an admin";
+        td.title = "Entries can be changed here for " + SELF_EDIT_DAYS + " days after the event.";
+        td.className = "muted-cell";
+        tr.appendChild(td); return;
+    }
+    const wrap = document.createElement("div"); wrap.className = "row-actions";
+    const evName = r.events ? r.events.name : "entry";
+    const edit = document.createElement("button");
+    edit.type = "button"; edit.className = "secondary small"; edit.textContent = "Edit";
+    edit.setAttribute("aria-label", "Edit " + (r.hour_type || DEFAULT_HOUR_TYPE) + " hours for " + evName);
+    edit.addEventListener("click", function () { startEditMyHours(tr, r); });
+    const del = document.createElement("button");
+    del.type = "button"; del.className = "danger small"; del.textContent = "Delete";
+    del.setAttribute("aria-label", "Delete " + (r.hour_type || DEFAULT_HOUR_TYPE) + " hours for " + evName);
+    del.addEventListener("click", function () { onDeleteMyHours(r); });
+    wrap.appendChild(edit); wrap.appendChild(del); td.appendChild(wrap); tr.appendChild(td);
+}
+function startEditMyHours(tr, r) {
+    const cells = tr.cells, evName = r.events ? r.events.name : "entry";
+    const mk = function (value, cls, label, isText) {
+        const i = document.createElement("input");
+        i.type = isText ? "text" : "number";
+        if (!isText) { i.step = "0.25"; i.min = "0"; i.max = "24"; }
+        i.value = value === null || value === undefined ? "" : String(value);
+        i.className = cls; i.setAttribute("aria-label", label + " for " + evName);
+        return i;
+    };
+    const hIn = mk(r.hours, "edit-hours", "Hours"), tIn = mk(r.travel_time, "edit-travel", "Travel hours");
+    const nIn = mk(r.notes || "", "edit-notes", "Notes", true);
+    const tySel = makeTypeSelect(r.hour_type, "Type of hours for " + evName);
+    cells[2].textContent = ""; cells[2].appendChild(tySel);
+    cells[3].textContent = ""; cells[3].appendChild(hIn);
+    cells[4].textContent = ""; cells[4].appendChild(tIn);
+    cells[6].textContent = ""; cells[6].appendChild(nIn);
+    tySel.addEventListener("change", function () { syncNoteRequired(tySel, nIn, null); });
+    syncNoteRequired(tySel, nIn, null);
+    const total = function () { cells[5].textContent = fmtNum((Number(hIn.value) || 0) + (Number(tIn.value) || 0)); };
+    hIn.addEventListener("input", total); tIn.addEventListener("input", total);
+    const act = cells[7]; act.textContent = "";
+    const wrap = document.createElement("div"); wrap.className = "row-actions";
+    const save = document.createElement("button");
+    save.type = "button"; save.className = "small"; save.textContent = "Save";
+    const cancel = document.createElement("button");
+    cancel.type = "button"; cancel.className = "secondary small"; cancel.textContent = "Cancel";
+    save.addEventListener("click", async function () {
+        const h = Number(hIn.value), t = Number(tIn.value || 0);
+        if (!(h > 0 && h <= 24)) { setStatus("hours-status", "Hours must be between 0 and 24.", true); hIn.focus(); return; }
+        if (t < 0 || t > 24) { setStatus("hours-status", "Travel hours must be between 0 and 24.", true); tIn.focus(); return; }
+        if (needsNote(tySel.value, nIn.value)) { setStatus("hours-status", "Add a note describing the work when the type is Other.", true); nIn.focus(); return; }
+        save.disabled = true;
+        try {
+            await updateMyHours(r.id, h, t, nIn.value.trim(), tySel.value);
+            setStatus("hours-status", "Entry updated.", false);
+            await loadHours();
+        } catch (err) { setStatus("hours-status", friendlyError(err), true); save.disabled = false; }
+    });
+    cancel.addEventListener("click", function () { renderHoursView(); });
+    wrap.appendChild(save); wrap.appendChild(cancel); act.appendChild(wrap);
+    hIn.focus();
+}
+async function onDeleteMyHours(r) {
+    const evName = r.events ? r.events.name : "this event";
+    if (!window.confirm("Are you sure you want to delete this?\n\n" + evName + " (" + (r.hour_type || DEFAULT_HOUR_TYPE) + "): " + fmtNum(r.total_hours)
+            + " total hours. This cannot be undone.")) { return; }
+    try {
+        await deleteMyHours(r.id);
+        setStatus("hours-status", "Entry deleted.", false);
+        await loadHours();
+    } catch (err) { setStatus("hours-status", err.message, true); }
+}
+
 // ---- Milestones (all-time total hours, including travel) ------------
 function renderMilestones() {
     const host = $("milestone-body");
@@ -1856,7 +2318,9 @@ function printHoursSummary(person, rows, range) {
         ev += Number(r.hours) || 0; tr += Number(r.travel_time) || 0; tot += Number(r.total_hours) || 0;
         const e = r.events || {};
         return "<tr><td>" + escapeHtml(fmtDate(e.start_at)) + "</td><td>" + escapeHtml(e.name || "")
-            + "</td><td>" + escapeHtml(e.location || "") + "</td><td class='num'>" + fmtNum(r.hours)
+            + "</td><td>" + escapeHtml(e.location || "") + "</td><td>" + escapeHtml(r.hour_type || DEFAULT_HOUR_TYPE)
+            + (r.hour_type === "Other" && r.notes ? ": " + escapeHtml(r.notes) : "")
+            + "</td><td class='num'>" + fmtNum(r.hours)
             + "</td><td class='num'>" + fmtNum(r.travel_time) + "</td><td class='num'>" + fmtNum(r.total_hours) + "</td></tr>";
     }).join("");
     const name = person.full_name || [person.first_name, person.last_name].filter(Boolean).join(" ") || person.email;
@@ -1867,11 +2331,14 @@ function printHoursSummary(person, rows, range) {
         + "<tr><th>Name</th><td>" + escapeHtml(name) + "</td></tr>"
         + "<tr><th>Email</th><td>" + escapeHtml(person.email || "") + "</td></tr>"
         + "<tr><th>Period</th><td>" + escapeHtml(rangeLabel(range)) + "</td></tr>"
-        + "<tr><th>Total hours</th><td><strong>" + fmtNum(tot) + "</strong> (" + fmtNum(ev) + " event + " + fmtNum(tr) + " travel)</td></tr>"
+        + "<tr><th>Total hours</th><td><strong>" + fmtNum(tot) + "</strong> (" + fmtNum(ev) + " hours + " + fmtNum(tr) + " travel)</td></tr>"
+        + "<tr><th>By type</th><td>" + HOUR_TYPES.map(function (t) {
+            let sum = 0; list.forEach(function (r) { if ((r.hour_type || DEFAULT_HOUR_TYPE) === t) { sum += Number(r.total_hours) || 0; } });
+            return escapeHtml(t) + " " + fmtNum(sum); }).join(" \u00b7 ") + "</td></tr>"
         + "</tbody></table>"
         + (list.length
-            ? "<table class='doc-table'><thead><tr><th>Date</th><th>Event</th><th>Location</th><th class='num'>Event hrs</th><th class='num'>Travel</th><th class='num'>Total</th></tr></thead><tbody>"
-              + body + "</tbody><tfoot><tr><th colspan='3'>Total (" + list.length + (list.length === 1 ? " event" : " events") + ")</th><th class='num'>"
+            ? "<table class='doc-table'><thead><tr><th>Date</th><th>Event</th><th>Location</th><th>Type</th><th class='num'>Hours</th><th class='num'>Travel</th><th class='num'>Total</th></tr></thead><tbody>"
+              + body + "</tbody><tfoot><tr><th colspan='4'>Total (" + list.length + (list.length === 1 ? " entry" : " entries") + ")</th><th class='num'>"
               + fmtNum(ev) + "</th><th class='num'>" + fmtNum(tr) + "</th><th class='num'>" + fmtNum(tot) + "</th></tr></tfoot></table>"
             : "<p>No volunteer hours were recorded for this period.</p>")
         + "<div class='doc-sign'><div><span></span>Verified by (name and title)</div><div><span></span>Signature</div><div><span></span>Date</div></div>"
@@ -2003,11 +2470,7 @@ async function processPendingCheckin() {
     clear();
     const logHours = {
         label: "Log hours for this event",
-        run: function () {
-            $("event-select").value = ev.id;
-            $("sec-log").scrollIntoView({ behavior: "smooth", block: "start" });
-            setTimeout(function () { $("hours-input").focus(); }, 400);
-        }
+        run: function () { goLogHours(ev.id); }
     };
     if (attendanceMap[ev.id]) {
         showCheckinBanner("ok", "You're already checked in to " + ev.name + ".", [logHours]);
@@ -2069,7 +2532,7 @@ const AUDIT_FIELDS = {
     address_line1: "Address line 1", address_line2: "Address line 2", city: "City", state: "State",
     postal_code: "Postal code", shirt_size: "Shirt size", is_admin: "Admin", archived: "Archived",
     auth_user_id: "Sign-in account", name: "Name", description: "Description", start_at: "Start",
-    end_at: "End", location: "Location", hours: "Event hours", travel_time: "Travel hours", notes: "Notes"
+    end_at: "End", location: "Location", hours: "Hours", hour_type: "Type", travel_time: "Travel hours", notes: "Notes"
 };
 const AUDIT_HIDDEN = ["member_id", "event_id", "created_by"];
 const AUDIT_NOUN = { members: "person", events: "event", volunteer_hours: "hours" };
@@ -2222,6 +2685,21 @@ window.addEventListener("DOMContentLoaded", function () {
     $("delete-event-confirm-btn").addEventListener("click", onDeleteEventConfirm);
     $("delete-event-cancel-btn").addEventListener("click", onDeleteEventCancel);
     $("log-form").addEventListener("submit", onLogForMember);
+    $("hours-type").addEventListener("change", onLogChoiceChange);
+    $("event-select").addEventListener("change", onLogChoiceChange);
+    $("log-type").addEventListener("change", function () {
+        syncNoteRequired($("log-type"), $("log-notes-input"), $("log-notes-label")); });
+    $("bulk-type").addEventListener("change", onBulkTypeChange);
+    $("log-member-search").addEventListener("input", onLogMemberSearch);
+    $("log-member-search").addEventListener("keydown", onLogMemberSearchKey);
+    $("sum-range").addEventListener("change", onSumRangeChange);
+    $("sum-from").addEventListener("change", onSumRangeChange);
+    $("sum-to").addEventListener("change", onSumRangeChange);
+    $("sum-export").addEventListener("click", onExportSummary);
+    $("sum-export-entries").addEventListener("click", onExportSummaryEntries);
+    $("export-renewals").addEventListener("click", onExportRenewals);
+    Array.prototype.forEach.call(document.querySelectorAll(".self-edit-days"),
+        function (el) { el.textContent = String(SELF_EDIT_DAYS); });
     $("log-hours-input").addEventListener("input", updateLogTotalPreview);
     $("log-travel-input").addEventListener("input", updateLogTotalPreview);
     $("bulk-search").addEventListener("input", onBulkSearch);
@@ -2246,6 +2724,7 @@ window.addEventListener("DOMContentLoaded", function () {
     $("qr-close").addEventListener("click", function () { hide("qr-panel"); });
     $("audit-more").addEventListener("click", function () { loadAudit(false); });
     fillRangeOptions($("hours-range"), yearsOf([]), true, hoursRange);
+    fillRangeOptions($("sum-range"), yearsOf([]), true, sumRange);
     try {
         const notice = sessionStorage.getItem("mmp.notice");
         if (notice) { sessionStorage.removeItem("mmp.notice"); setStatus("login-status", notice, true); }
