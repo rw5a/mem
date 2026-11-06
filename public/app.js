@@ -1058,7 +1058,8 @@ function selectEvent(ev) {
     $("ee_name").value = ev.name || ""; $("ee_location").value = ev.location || "";
     $("ee_start").value = toLocalInput(ev.start_at); $("ee_end").value = toLocalInput(ev.end_at);
     $("ee_desc").value = ev.description || "";
-    hide("qr-panel");
+    hide("qr-panel"); hide("delete-event-confirm");
+    setStatus("edit-event-status", "", false);
     show("edit-event-form");
 }
 async function onSaveEvent(event) {
@@ -1076,7 +1077,52 @@ async function onSaveEvent(event) {
         await loadAdminEvents(); await loadSummary();
     } catch (err) { setStatus("edit-event-status", err.message, true); }
 }
-function onCancelEditEvent() { selectedEventId = null; hide("edit-event-form"); hide("qr-panel"); }
+function onCancelEditEvent() {
+    selectedEventId = null; hide("edit-event-form"); hide("qr-panel"); hide("delete-event-confirm");
+}
+
+// ---- Delete event (with everything linked to it) -------------------
+// Step 1: show an inline "Are you sure?" box that spells out what goes with it.
+function onDeleteEventClick() {
+    if (!selectedEventId) { return; }
+    const ev = eventsCache.filter(function (e) { return e.id === selectedEventId; })[0] || {};
+    const sum = summaryRows.filter(function (r) { return r.event_id === selectedEventId; })[0];
+    let text = "\u201c" + (ev.name || "This event") + "\u201d"
+        + (ev.start_at ? " (" + fmtDT(ev.start_at) + ")" : "")
+        + " and everything linked to it will be permanently removed";
+    if (sum) {
+        const n = Number(sum.member_count) || 0, a = Number(sum.attended_count) || 0, r = Number(sum.rsvp_count) || 0;
+        text += ": " + n + (n === 1 ? " hours entry" : " hours entries")
+            + " (" + fmtNum(sum.total_hours) + " total hours), "
+            + a + (a === 1 ? " check-in" : " check-ins") + ", and "
+            + r + (r === 1 ? " RSVP" : " RSVPs");
+    } else {
+        text += ", including all logged hours, check-ins, and RSVPs";
+    }
+    text += ". This cannot be undone. (The change history keeps a record of what was deleted.)";
+    $("delete-event-confirm-text").textContent = text;
+    hide("qr-panel");
+    show("delete-event-confirm");
+    $("delete-event-cancel-btn").focus();     // safe default for keyboard users
+}
+function onDeleteEventCancel() { hide("delete-event-confirm"); $("delete-event-btn").focus(); }
+// Step 2: actually delete, then refresh every view that showed this event.
+async function onDeleteEventConfirm() {
+    if (!selectedEventId) { return; }
+    const btn = $("delete-event-confirm-btn");
+    btn.disabled = true;
+    try {
+        const gone = await adminDeleteEvent(selectedEventId);
+        onCancelEditEvent();
+        $("manage-body").innerHTML = ""; setStatus("manage-status", "", false); tfRefresh("manage");
+        setStatus("events-status", "Deleted \u201c" + (gone.name || "event") + "\u201d and its hours, check-ins, and RSVPs.", false);
+        await loadAdminEvents();
+        await Promise.all([refreshDerived(), loadMemberEvents(), loadHours()]);
+        renderMemberDash();
+    } catch (err) {
+        setStatus("edit-event-status", err.message, true);
+    } finally { btn.disabled = false; }
+}
 
 // ---- Summary -------------------------------------------------------
 async function loadSummary() {
@@ -2111,6 +2157,9 @@ window.addEventListener("DOMContentLoaded", function () {
     $("create-event-form").addEventListener("submit", onCreateEvent);
     $("edit-event-form").addEventListener("submit", onSaveEvent);
     $("cancel-edit-event").addEventListener("click", onCancelEditEvent);
+    $("delete-event-btn").addEventListener("click", onDeleteEventClick);
+    $("delete-event-confirm-btn").addEventListener("click", onDeleteEventConfirm);
+    $("delete-event-cancel-btn").addEventListener("click", onDeleteEventCancel);
     $("log-form").addEventListener("submit", onLogForMember);
     $("log-hours-input").addEventListener("input", updateLogTotalPreview);
     $("log-travel-input").addEventListener("input", updateLogTotalPreview);
