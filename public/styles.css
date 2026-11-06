@@ -362,3 +362,98 @@ html[data-theme="dark"] {
 
 /* Sign-in: "Keep me signed in" hint sits just under its checkbox */
 #remember-hint { margin: .15rem 0 0 1.85rem; }
+
+/* ---- Hours period bar (My logged hours, Edit person) ---------------- */
+.range-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem .75rem; margin: .5rem 0; }
+.range-bar label { margin-top: 0; }
+.range-bar select, .range-bar input[type="date"] { width: auto; min-width: 9rem; }
+.range-bar button { margin-top: 0; }
+.custom-range { display: flex; flex-wrap: wrap; gap: .5rem .75rem; }
+
+/* ---- Milestones ------------------------------------------------------ */
+.milestones { margin-bottom: 16px; }
+.milestones h2 { margin-bottom: .5rem; }
+.badges { display: flex; flex-wrap: wrap; gap: .4rem; }
+.milestone {
+  display: inline-block; padding: .2rem .65rem; border-radius: 999px; font-size: .85rem; font-weight: 600;
+  border: 1px dashed var(--line-strong); color: var(--muted); background: transparent;
+}
+.milestone.earned { border-style: solid; border-color: currentColor; background: var(--b-ok-bg); color: var(--b-ok-fg); }
+.milestone-next { margin: .6rem 0 .3rem; font-size: .95rem; }
+.milestone-bar { width: 100%; max-width: 28rem; height: .8rem; accent-color: var(--ok); }
+
+/* ---- QR check-in ----------------------------------------------------- */
+.checkin-banner { order: -3; border-left: 4px solid var(--link); }
+.checkin-banner p { margin: 0 0 .25rem; font-weight: 600; font-size: 1.02rem; }
+.checkin-banner.ok    { border-left-color: var(--ok); background: var(--b-ok-bg); color: var(--b-ok-fg); }
+.checkin-banner.info  { border-left-color: var(--link); background: var(--b-info-bg); color: var(--b-info-fg); }
+.checkin-banner.warn  { border-left-color: var(--warn); background: var(--b-warn-bg); color: var(--b-warn-fg); }
+.checkin-banner.error { border-left-color: var(--bad); background: var(--b-bad-bg); color: var(--b-bad-fg); }
+.checkin-banner .toolbar { margin: .25rem 0 0; }
+.qr-panel { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+.qr-card { text-align: center; background: #fff; color: #111; border: 1px solid var(--line); border-radius: 8px; padding: 1rem; max-width: 26rem; }
+.qr-event { font-size: 1.25rem; font-weight: 700; }
+.qr-when { font-size: .95rem; margin: .2rem 0 .6rem; }
+.qr-img svg { width: 100%; max-width: 18rem; height: auto; display: block; margin: 0 auto; }
+.qr-cta { font-weight: 700; margin-top: .5rem; }
+.qr-url { font-size: .75rem; word-break: break-all; color: #444; margin-top: .3rem; }
+
+/* ---- Install help (About panel) -------------------------------------- */
+.install-help { margin-top: .75rem; border-top: 1px solid var(--line); padding-top: .5rem; }
+.install-help h3 { margin-top: .25rem; }
+.install-help button { margin: .25rem 0 .4rem; }
+
+/* ---- Change history -------------------------------------------------- */
+.audit-details { font-size: .85rem; min-width: 14rem; }
+.audit-details div { margin: .1rem 0; }
+#audit-more { margin-top: .6rem; }
+
+/* ---- Printing: only #print-area is printed --------------------------- */
+#print-area { display: none; }
+@media print {
+  body.printing > *:not(#print-area) { display: none !important; }
+  body.printing #print-area { display: block !important; }
+  body.printing { background: #fff !important; color: #000 !important; }
+  @page { margin: 14mm; }
+}
+#print-area { font-family: inherit; color: #000; }
+#print-area .doc { font-size: 11pt; }
+#print-area .doc-org { display: flex; align-items: center; gap: 12px; border-bottom: 2px solid #003e73; padding-bottom: 8px; margin-bottom: 12px; }
+#print-area .doc-logo { max-height: 56px; max-width: 120px; }
+#print-area .doc-org-name { font-size: 15pt; font-weight: 700; color: #003e73; }
+#print-area .doc-org-lines { font-size: 9pt; color: #333; }
+#print-area h1 { font-size: 17pt; margin: 6px 0 10px; color: #000; }
+#print-area table { border-collapse: collapse; width: 100%; }
+#print-area .doc-facts { width: auto; margin-bottom: 12px; }
+#print-area .doc-facts th { text-align: left; padding: 2px 16px 2px 0; color: #333; font-weight: 600; }
+#print-area .doc-facts td { padding: 2px 0; }
+#print-area .doc-table th, #print-area .doc-table td { border: 1px solid #999; padding: 4px 6px; text-align: left; vertical-align: top; }
+#print-area .doc-table thead th { background: #e8eef5; }
+#print-area .doc-table tfoot th { background: #f3f3f3; }
+#print-area .doc-table .num { text-align: right; white-space: nowrap; }
+#print-area .doc-table tr { break-inside: avoid; }
+#print-area .doc-sign { display: flex; gap: 24px; margin-top: 36px; break-inside: avoid; }
+#print-area .doc-sign div { flex: 1; font-size: 9pt; color: #333; }
+#print-area .doc-sign span { display: block; border-bottom: 1px solid #000; height: 28px; margin-bottom: 4px; }
+#print-area .doc-foot { font-size: 8.5pt; color: #555; margin-top: 18px; }
+#print-area .qr-print-card { text-align: center; }
+#print-area .qr-print-card .doc-org { justify-content: center; }
+#print-area .qr-event { font-size: 26pt; font-weight: 700; margin-top: 16px; }
+#print-area .qr-when { font-size: 14pt; margin: 6px 0 18px; }
+#print-area .qr-img svg { width: 120mm; max-width: 100%; height: auto; }
+#print-area .qr-cta { font-size: 18pt; font-weight: 700; margin-top: 14px; }
+#print-area .qr-url { font-size: 9pt; color: #444; margin-top: 8px; word-break: break-all; }
+#hours-body td:first-child { white-space: nowrap; }
+#print-area .doc-facts tr { background: none !important; }
+
+/* Change history on phones: each change becomes a stacked card */
+@media (max-width: 640px) {
+  #apanel-audit .table-wrap { max-height: none; border: 0; background: transparent; }
+  #apanel-audit table, #apanel-audit tbody, #apanel-audit tr, #apanel-audit td { display: block; width: 100%; }
+  #apanel-audit thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  #apanel-audit tbody tr { border: .5px solid var(--line); border-radius: 8px; margin-bottom: .6rem; padding: .4rem .2rem; background: var(--surface); }
+  #apanel-audit tbody tr.flag td:first-child { box-shadow: none; }
+  #apanel-audit tbody tr.flag { border-left: 4px solid var(--warn); }
+  #apanel-audit td { border: 0; padding: .2rem .6rem; }
+  #apanel-audit td::before { content: attr(data-label); display: block; font-size: .75rem; font-weight: 700; color: var(--muted); }
+}
