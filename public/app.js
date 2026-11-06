@@ -384,6 +384,10 @@ async function loadMemberEvents() {
         renderEventGroup(list, "Upcoming", upcoming, true);
         renderPastList(list, past);
         const select = $("event-select"); select.innerHTML = "";
+        // Blank first choice so a cleared form never silently points at an event.
+        const blank = document.createElement("option");
+        blank.value = ""; blank.textContent = "Select an event\u2026";
+        select.appendChild(blank);
         const ordered = upcoming.concat(past);
         for (let i = 0; i < ordered.length; i += 1) {
             const opt = document.createElement("option");
@@ -544,10 +548,13 @@ async function onLogHours(event) {
     const hours = Number($("hours-input").value);
     const travel = Number($("travel-input").value || 0);
     const notes = $("hours-notes").value.trim();
+    if (!eventId) { setStatus("hours-status", "Select an event.", true); return; }
     if (!(hours > 0 && hours <= 24)) { setStatus("hours-status", "Event hours must be between 0 and 24.", true); return; }
     if (travel < 0 || travel > 24) { setStatus("hours-status", "Travel hours must be between 0 and 24.", true); return; }
     try {
         await logVolunteerHours(eventId, hours, travel, notes);
+        $("hours-form").reset();          // clear event, hours, travel and notes
+        updateTotalPreview();             // reset the "Total" display to 0
         setStatus("hours-status", "Hours logged.", false);
         await loadHours();
     } catch (err) { setStatus("hours-status", err.message, true); }
@@ -1029,6 +1036,9 @@ function populateEventSelects(events) {
         const sel = $(targets[t]);
         if (!sel) { continue; }
         sel.innerHTML = "";
+        // Blank first choice on the single-entry form so clearing it never
+        // silently points at an event.
+        if (targets[t] === "log-event-select") { addBlankOption(sel, "Select an event\u2026"); }
         const n = Math.min(events.length, MAX_ROWS);
         for (let i = 0; i < n; i += 1) {
             const opt = document.createElement("option");
@@ -1163,10 +1173,16 @@ function memberLabel(m) {
     const name = m.full_name ? m.full_name + " " : "";
     return name + "<" + m.email + ">" + (m.is_member ? "" : " (non-member)");
 }
+function addBlankOption(sel, label) {
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = label;
+    sel.appendChild(opt);
+}
 function populateMemberSelect(selectId, members) {
     const sel = $(selectId);
     if (!sel) { return; }
     sel.innerHTML = "";
+    addBlankOption(sel, "Select a person\u2026");
     const n = Math.min(members.length, MAX_ROWS);
     for (let i = 0; i < n; i += 1) {
         const opt = document.createElement("option");
@@ -1190,6 +1206,8 @@ async function onLogForMember(event) {
     if (travel < 0 || travel > 24) { setStatus("log-status", "Travel hours must be between 0 and 24.", true); return; }
     try {
         await adminLogHoursFor(memberId, eventId, hours, travel, notes);
+        $("log-form").reset();            // clear person, event, hours, travel and notes
+        updateLogTotalPreview();          // reset the "Total" display to 0
         setStatus("log-status", "Hours saved.", false);
         await refreshDerived();
     } catch (err) { setStatus("log-status", err.message, true); }
