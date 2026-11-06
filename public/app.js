@@ -211,6 +211,20 @@ function showMemberView() {
     $("tab-admin").removeAttribute("aria-current");
     renderMemberDash();
 }
+// Clicking the "My Portal" tab: switch view, then pull fresh events and hours
+// so changes made on the Admin side (new/edited/deleted events, hours logged
+// for you) show up without reloading the page. Profile form is left alone so
+// unsaved typing isn't lost.
+let memberRefreshing = false;
+async function onMemberTab() {
+    showMemberView();
+    if (memberRefreshing || !myMemberId) { return; }
+    memberRefreshing = true;
+    try {
+        await Promise.all([loadMemberEvents(), loadHours()]);
+        renderMemberDash();
+    } finally { memberRefreshing = false; }
+}
 async function showAdminView() {
     if (!me || !me.is_admin) { return; }
     hide("member-view"); show("admin-view");
@@ -222,8 +236,25 @@ async function showAdminView() {
         await loadAdminEvents();
         await Promise.all([loadMembers(), loadSummary(), loadTools()]);
         adminLoaded = true;
+    } else {
+        await refreshAdminData();     // every later visit: pull fresh data
     }
     renderAdminDash();
+}
+// Re-fetches everything the Admin tab shows, so hours, RSVPs, check-ins and
+// profile changes made on My Portal (or by other people) appear right away.
+// Open edit forms keep what's typed in them; drop-down choices are kept.
+let adminRefreshing = false;
+async function refreshAdminData() {
+    if (adminRefreshing) { return; }
+    adminRefreshing = true;
+    try {
+        await loadAdminEvents();
+        await Promise.all([loadMembers(), loadSummary()]);
+        await loadTools();                                   // uses the fresh people list
+        const auditTab = $("atab-audit");
+        if (auditTab && auditTab.getAttribute("aria-selected") === "true") { loadAudit(true); }
+    } finally { adminRefreshing = false; }
 }
 // ---- Org branding + About panel (driven by ORG in config.js) -------
 function escapeHtml(s) {
@@ -383,7 +414,7 @@ async function loadMemberEvents() {
         const list = $("events-list"); list.innerHTML = "";
         renderEventGroup(list, "Upcoming", upcoming, true);
         renderPastList(list, past);
-        const select = $("event-select"); select.innerHTML = "";
+        const select = $("event-select"); const keepEvent = select.value; select.innerHTML = "";
         // Blank first choice so a cleared form never silently points at an event.
         const blank = document.createElement("option");
         blank.value = ""; blank.textContent = "Select an event\u2026";
@@ -395,6 +426,7 @@ async function loadMemberEvents() {
             opt.textContent = ordered[i].name + " (" + fmtDT(ordered[i].start_at) + ")";
             select.appendChild(opt);
         }
+        restoreSelection(select, keepEvent);
     } catch (err) { setStatus("hours-status", err.message, true); }
     renderMemberDash();
 }
@@ -1035,6 +1067,7 @@ function populateEventSelects(events) {
     for (let t = 0; t < targets.length; t += 1) {
         const sel = $(targets[t]);
         if (!sel) { continue; }
+        const keep = sel.value;
         sel.innerHTML = "";
         // Blank first choice on the single-entry form so clearing it never
         // silently points at an event.
@@ -1046,6 +1079,14 @@ function populateEventSelects(events) {
             opt.textContent = events[i].name + " (" + fmtDT(events[i].start_at) + ")";
             sel.appendChild(opt);
         }
+        restoreSelection(sel, keep);
+    }
+}
+// After rebuilding a drop-down, re-select what was chosen before (if it still exists).
+function restoreSelection(sel, value) {
+    if (!value) { return; }
+    for (let i = 0; i < sel.options.length; i += 1) {
+        if (sel.options[i].value === value) { sel.value = value; return; }
     }
 }
 async function onCreateEvent(event) {
@@ -1181,6 +1222,7 @@ function addBlankOption(sel, label) {
 function populateMemberSelect(selectId, members) {
     const sel = $(selectId);
     if (!sel) { return; }
+    const keep = sel.value;
     sel.innerHTML = "";
     addBlankOption(sel, "Select a person\u2026");
     const n = Math.min(members.length, MAX_ROWS);
@@ -1189,6 +1231,7 @@ function populateMemberSelect(selectId, members) {
         opt.value = members[i].id; opt.textContent = memberLabel(members[i]);
         sel.appendChild(opt);
     }
+    restoreSelection(sel, keep);
 }
 function updateLogTotalPreview() {
     const h = Number($("log-hours-input").value) || 0;
@@ -2131,7 +2174,7 @@ window.addEventListener("DOMContentLoaded", function () {
     $("request-code-form").addEventListener("submit", onRequestCode);
     $("verify-code-form").addEventListener("submit", onVerifyCode);
     $("logout-btn").addEventListener("click", onLogout);
-    $("tab-member").addEventListener("click", showMemberView);
+    $("tab-member").addEventListener("click", onMemberTab);
     $("tab-admin").addEventListener("click", showAdminView);
 
     // Member view
