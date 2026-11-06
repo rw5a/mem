@@ -8,7 +8,7 @@
   // Apply saved theme before first paint (light is the default).
   (function () { try { if (localStorage.getItem("mmp.theme") === "dark") { document.documentElement.setAttribute("data-theme", "dark"); } } catch (e) {} })();
 </script>
-<link rel="stylesheet" href="styles.css?v=2026-11-06d">
+<link rel="stylesheet" href="styles.css?v=2026-11-06f">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#003e73">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
@@ -175,8 +175,8 @@
         <select id="event-select"></select>
         <label for="hours-type">Type of hours</label>
         <select id="hours-type" class="hours-type"><option value="Event Day" selected>Event Day</option><option value="Administrative Work">Administrative Work</option><option value="Other">Other</option></select>
-        <p class="flag-note">You can log one entry of each type per event, including events that haven't happened yet
-           (e.g. administrative work beforehand). To change an entry, use Edit in <em>My logged hours</em> below
+        <p class="flag-note">You can log as many entries as you need for an event, of any type, including events that
+           haven't happened yet (e.g. administrative work beforehand). Each save adds a new entry. To change an entry, use Edit in <em>My logged hours</em> below
            (available until <span class="self-edit-days">30</span> days after the event).</p>
         <div class="grid3">
           <div><label for="hours-input">Hours (0-24)</label>
@@ -630,9 +630,9 @@
 <div id="toast-host" class="toast-host" aria-hidden="true"></div>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
 <script src="env.js"></script>
-<script src="config.js?v=2026-11-06d"></script>
-<script src="api.js?v=2026-11-06d"></script>
+<script src="config.js?v=2026-11-06f"></script>
+<script src="api.js?v=2026-11-06f"></script>
 <script src="vendor/qrcode.js"></script>
-<script src="app.js?v=2026-11-06d"></script>
+<script src="app.js?v=2026-11-06f"></script>
 </body>
 </html>
