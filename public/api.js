@@ -337,6 +337,19 @@ async function adminUpdateEvent(eventId, fields) {
             start_at: fields.start_at, end_at: fields.end_at || null, location: fields.location || null })
     });
 }
+// Deletes an event. The database removes everything tied to it (hours
+// entries, check-ins, RSVPs) via ON DELETE CASCADE. Returns the deleted row so
+// the caller can tell "deleted" apart from "nothing deleted" (e.g. no rights).
+async function adminDeleteEvent(eventId) {
+    const rows = await apiFetch(REST_BASE + "/events?id=eq." + encodeURIComponent(eventId), {
+        method: "DELETE",
+        headers: Object.assign(authHeaders(), { "Prefer": "return=representation" })
+    });
+    if (!Array.isArray(rows) || rows.length === 0) {
+        throw new Error("The event wasn't deleted. It may already be gone, or you may not have admin rights.");
+    }
+    return rows[0];
+}
 async function adminLogHoursFor(memberId, eventId, hours, travel, notes) {
     return apiFetch(REST_BASE + "/rpc/admin_log_hours", {
         method: "POST", headers: authHeaders(),
