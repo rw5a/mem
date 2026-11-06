@@ -231,11 +231,27 @@ async function setMyRsvp(eventId, rsvp) {
         body: JSON.stringify({ p_event_id: eventId, p_rsvp: !!rsvp })
     });
 }
-async function logVolunteerHours(eventId, hours, travel, notes) {
+async function logVolunteerHours(eventId, hours, travel, notes, hourType) {
     return apiFetch(REST_BASE + "/rpc/log_volunteer_hours", {
         method: "POST", headers: authHeaders(),
         body: JSON.stringify({ p_event_id: eventId, p_hours: hours,
-            p_travel: travel || 0, p_notes: notes || null })
+            p_travel: travel || 0, p_notes: notes || null, p_hour_type: hourType || "Event Day" })
+    });
+}
+// Edits one of the signed-in person's own entries (may change its type).
+async function updateMyHours(entryId, hours, travel, notes, hourType) {
+    return apiFetch(REST_BASE + "/rpc/update_my_hours", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ p_entry_id: entryId, p_hours: hours, p_travel: travel || 0,
+            p_notes: notes || null, p_hour_type: hourType || "Event Day" })
+    });
+}
+// Deletes one of the signed-in person's own hours entries (the database
+// only allows this within a set number of days after the event).
+async function deleteMyHours(entryId) {
+    return apiFetch(REST_BASE + "/rpc/delete_my_hours", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ p_entry_id: entryId })
     });
 }
 async function getMemberVolunteerHours(memberId) {
@@ -265,7 +281,7 @@ async function adminFetchAllMembers() {
 }
 async function adminFetchAllHours() {
     const BATCH_SIZE = 500, MAX_BATCHES = 2000;
-    const select = "id,logged_at,hours,travel_time,total_hours,notes,"
+    const select = "id,logged_at,hour_type,hours,travel_time,total_hours,notes,"
         + "members(first_name,last_name,email,is_member),events(name,start_at,location)";
     const all = []; let cursor = null;
     for (let b = 0; b < MAX_BATCHES; b += 1) {
@@ -350,11 +366,11 @@ async function adminDeleteEvent(eventId) {
     }
     return rows[0];
 }
-async function adminLogHoursFor(memberId, eventId, hours, travel, notes) {
+async function adminLogHoursFor(memberId, eventId, hours, travel, notes, hourType) {
     return apiFetch(REST_BASE + "/rpc/admin_log_hours", {
         method: "POST", headers: authHeaders(),
         body: JSON.stringify({ p_member_id: memberId, p_event_id: eventId, p_hours: hours,
-            p_travel: travel || 0, p_notes: notes || null })
+            p_travel: travel || 0, p_notes: notes || null, p_hour_type: hourType || "Event Day" })
     });
 }
 async function adminBulkLogHours(eventId, entries) {
@@ -367,9 +383,17 @@ async function adminEventHoursSummary() {
     return apiFetch(REST_BASE + "/rpc/admin_event_hours_summary", {
         method: "POST", headers: authHeaders(), body: JSON.stringify({}) });
 }
+// The existing entry (if any) for one person, event and hours type; null if none.
+async function adminGetHoursEntry(memberId, eventId, hourType) {
+    const rows = await apiFetch(REST_BASE + "/volunteer_hours?select=id,hour_type,hours,travel_time,total_hours,notes"
+        + "&member_id=eq." + encodeURIComponent(memberId) + "&event_id=eq." + encodeURIComponent(eventId)
+        + "&hour_type=eq." + encodeURIComponent(hourType || "Event Day"),
+        { method: "GET", headers: authHeaders() });
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
 async function adminListHoursForEvent(eventId) {
     return apiFetch(REST_BASE + "/volunteer_hours"
-        + "?select=id,hours,travel_time,total_hours,notes,member_id,members(full_name,email)"
+        + "?select=id,hour_type,hours,travel_time,total_hours,notes,member_id,members(full_name,email)"
         + "&event_id=eq." + encodeURIComponent(eventId) + "&order=logged_at.desc",
         { method: "GET", headers: authHeaders() });
 }
