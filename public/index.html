@@ -9,6 +9,14 @@
   (function () { try { if (localStorage.getItem("mmp.theme") === "dark") { document.documentElement.setAttribute("data-theme", "dark"); } } catch (e) {} })();
 </script>
 <link rel="stylesheet" href="styles.css">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#003e73">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Members">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to main content</a>
@@ -38,6 +46,13 @@
 <div id="about-panel" class="about-panel" hidden>
   <h2 id="about-name"></h2>
   <div id="about-body"></div>
+  <div id="install-help" class="install-help">
+    <h3>Add this portal to your home screen</h3>
+    <button id="install-btn" type="button" class="secondary small" hidden>Install app</button>
+    <p class="about-row" id="install-ios"><strong>iPhone/iPad (Safari):</strong> tap the Share button, then <em>Add to Home Screen</em>.</p>
+    <p class="about-row" id="install-android"><strong>Android (Chrome):</strong> open the &#8942; menu, then <em>Install app</em> or <em>Add to Home screen</em>.</p>
+    <p class="about-row" id="install-done" hidden>You're using the installed app.</p>
+  </div>
 </div>
 
 <!-- ============ SIGN IN ============ -->
@@ -67,9 +82,18 @@
   <!-- ============ MEMBER / PERSON VIEW ============ -->
   <div id="member-view">
 
+    <section id="checkin-banner" class="checkin-banner" hidden>
+      <p id="checkin-text" role="status" aria-live="polite"></p>
+      <div class="toolbar" id="checkin-actions"></div>
+    </section>
+
     <!-- 1. metric cards  2. charts  (hidden until the profile is complete) -->
     <div class="member-dash">
       <div class="metrics" id="member-metrics" aria-label="My summary"></div>
+      <section class="milestones" id="milestones" aria-labelledby="milestones-title">
+        <h2 id="milestones-title">Milestones</h2>
+        <div id="milestone-body"></div>
+      </section>
       <div class="charts" id="member-charts">
         <div class="card">
           <h2>My hours by event</h2>
@@ -101,10 +125,10 @@
         <strong><span id="shirt-sent-date"></span></strong></p>
     </section>
 
-   <section id="sec-nonmember" hidden>
-      <p class="notice">You're signed in.
-        You can start logging volunteer hours and marking attendance to events.
-        You aren't a member yet — <a href="https://www.arkansasclimbers.org/join-now" target="_blank" rel="noopener noreferrer">Join Here!</a></p>
+    <section id="sec-nonmember" hidden>
+      <p class="notice">You're signed in. Add your first name, last name, and phone
+        in My profile below (then Save) to log volunteer hours and mark attendance.
+        You aren't a member yet — an administrator can add a membership to your account.</p>
     </section>
     <!-- kept for app.js compatibility (hide/show by id) -->
     <span id="nonmember-note" hidden></span>
@@ -163,6 +187,14 @@
       </form>
 
       <h2 style="margin-top:1.25rem">My logged hours</h2>
+      <div class="range-bar">
+        <div><label for="hours-range">Show</label><select id="hours-range"></select></div>
+        <div class="custom-range" id="custom-range" hidden>
+          <div><label for="range-from">From</label><input id="range-from" type="date"></div>
+          <div><label for="range-to">To</label><input id="range-to" type="date"></div>
+        </div>
+        <button id="print-hours" type="button" class="secondary">Print hours summary</button>
+      </div>
       <div class="table-tools">
         <label class="sr-only" for="hours-search">Search my logged hours</label>
         <input id="hours-search" type="search" placeholder="Search events or notes...">
@@ -172,7 +204,7 @@
       <div class="table-wrap" role="region" tabindex="0" aria-label="My logged hours table">
         <table>
           <caption class="sr-only">My logged volunteer hours</caption>
-          <thead><tr><th scope="col">Event</th><th scope="col">Event hrs</th><th scope="col">Travel</th>
+          <thead><tr><th scope="col">Date</th><th scope="col">Event</th><th scope="col">Event hrs</th><th scope="col">Travel</th>
             <th scope="col">Total</th><th scope="col">Notes</th></tr></thead>
           <tbody id="hours-body"></tbody>
         </table>
@@ -211,6 +243,7 @@
       <button type="button" role="tab" id="atab-events" aria-controls="apanel-events" aria-selected="false" tabindex="-1">Events</button>
       <button type="button" role="tab" id="atab-summary" aria-controls="apanel-summary" aria-selected="false" tabindex="-1">Volunteer hours</button>
       <button type="button" role="tab" id="atab-log" aria-controls="apanel-log" aria-selected="false" tabindex="-1">Log &amp; manage hours</button>
+      <button type="button" role="tab" id="atab-audit" aria-controls="apanel-audit" aria-selected="false" tabindex="-1">Change history</button>
     </div>
 
     <!-- ---- People ---- -->
@@ -331,6 +364,12 @@
           <button type="submit">Save person</button>
           <button id="archive-btn" type="button" class="secondary">Archive</button>
         </div>
+        <h3>Volunteer hours summary</h3>
+        <div class="range-bar">
+          <div><label for="e_print_range">Period</label><select id="e_print_range"></select></div>
+          <button id="e_print_hours" type="button" class="secondary">Print hours summary</button>
+        </div>
+        <p id="e_print_status" class="status" role="status" aria-live="polite"></p>
         <div id="archive-confirm" class="confirm-box" role="alert" hidden>
           <p>Archive this person? They will be hidden from the People list and logging tools. You can unarchive them later.</p>
           <div class="toolbar">
@@ -402,10 +441,24 @@
         <textarea id="ee_desc" rows="2"></textarea>
         <div class="toolbar">
           <button type="submit">Save event</button>
+          <button id="qr-btn" type="button" class="secondary">Check-in QR code</button>
           <button id="cancel-edit-event" type="button" class="secondary">Cancel</button>
         </div>
         <p id="edit-event-status" class="status" role="status" aria-live="polite"></p>
       </form>
+      <div id="qr-panel" class="qr-panel" hidden>
+        <h2>Check-in QR code</h2>
+        <p>Show this on a screen or print it and post it at the event. People scan it with their
+           phone camera, sign in if needed, and are marked as attended. Check-in works from
+           2 hours before the start until the end of the event day.</p>
+        <div id="qr-card" class="qr-card"></div>
+        <div class="toolbar">
+          <button id="qr-print" type="button">Print QR code</button>
+          <button id="qr-copy" type="button" class="secondary">Copy link</button>
+          <button id="qr-close" type="button" class="secondary">Close</button>
+        </div>
+        <p id="qr-status" class="status" role="status" aria-live="polite"></p>
+      </div>
     </section>
     </div>
 
@@ -500,14 +553,43 @@
       <p id="manage-status" class="status" role="status" aria-live="polite"></p>
     </section>
     </div>
+
+    <!-- ---- Change history ---- -->
+    <div role="tabpanel" id="apanel-audit" aria-labelledby="atab-audit" hidden>
+    <section>
+      <h2>Change history</h2>
+      <p>Who changed what, and when, for people, events, and volunteer hours, newest first.
+         This history can't be edited or deleted from the portal.</p>
+      <div class="table-tools">
+        <label class="sr-only" for="audit-search">Search change history</label>
+        <input id="audit-search" type="search" placeholder="Search names, events, fields...">
+        <div class="filters" id="audit-filters" role="group" aria-label="Filter change history"></div>
+        <p class="count-line" id="audit-count" aria-live="polite"></p>
+      </div>
+      <div class="table-wrap" role="region" tabindex="0" aria-label="Change history table">
+        <table>
+          <caption class="sr-only">Change history</caption>
+          <thead><tr><th scope="col">When</th><th scope="col">Changed by</th><th scope="col">What</th>
+            <th scope="col">Record</th><th scope="col">Details</th></tr></thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+      <button id="audit-more" type="button" class="secondary" hidden>Load older changes</button>
+      <p id="audit-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+    </div>
   </div>
 </div>
 </main>
+
+<!-- Filled in just before printing (hours summary or QR code); hidden on screen -->
+<div id="print-area" aria-hidden="true"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
 <script src="env.js"></script>
 <script src="config.js"></script>
 <script src="api.js"></script>
+<script src="vendor/qrcode.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
