@@ -53,7 +53,7 @@ const ORG = Object.freeze({
     name:    "Arkansas Climbers Coalition",
     logo_url: "",                       // e.g. "logo.png" or "https://.../logo.svg"
     address: "Arkansas",
-    phone:   "000-000-0000",
+    //phone:   "000-000-0000",
     email:   "contact@arkansasclimbers.org",
     website: "https://arkansasclimbers.org",
     // Time zone your events take place in. Everyone sees event times in this
