@@ -383,14 +383,6 @@ async function adminEventHoursSummary() {
     return apiFetch(REST_BASE + "/rpc/admin_event_hours_summary", {
         method: "POST", headers: authHeaders(), body: JSON.stringify({}) });
 }
-// The existing entry (if any) for one person, event and hours type; null if none.
-async function adminGetHoursEntry(memberId, eventId, hourType) {
-    const rows = await apiFetch(REST_BASE + "/volunteer_hours?select=id,hour_type,hours,travel_time,total_hours,notes"
-        + "&member_id=eq." + encodeURIComponent(memberId) + "&event_id=eq." + encodeURIComponent(eventId)
-        + "&hour_type=eq." + encodeURIComponent(hourType || "Event Day"),
-        { method: "GET", headers: authHeaders() });
-    return Array.isArray(rows) && rows.length ? rows[0] : null;
-}
 async function adminListHoursForEvent(eventId) {
     return apiFetch(REST_BASE + "/volunteer_hours"
         + "?select=id,hour_type,hours,travel_time,total_hours,notes,member_id,members(full_name,email)"
