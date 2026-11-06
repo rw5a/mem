@@ -60,8 +60,6 @@ function needsNote(type, notes) { return type === "Other" && !String(notes || ""
 // Turns database error text into plain language where we can.
 function friendlyError(err) {
     const m = String((err && err.message) || err || "");
-    if (m.indexOf("volunteer_hours_member_event_type_key") >= 0) {
-        return "This person already has an entry of that type for this event. Edit that entry instead."; }
     if (m.indexOf("volunteer_hours_other_needs_note") >= 0) { return "A note is required when the type is Other."; }
     return m;
 }
@@ -180,6 +178,14 @@ function syncShirtDate(tierId, dateId) {
 }
 
 // ---- Login + single entry ------------------------------------------
+// Guards a save form against double-submits: returns null if a save is already
+// running; otherwise locks the form's Save button and returns a release function.
+function startSave(form, busyLabel) {
+    if (!form || form.dataset.saving === "1") { return null; }
+    form.dataset.saving = "1";
+    const done = setBusy(form.querySelector("button[type=submit]"), busyLabel);
+    return function () { delete form.dataset.saving; done(); };
+}
 // Show that a button was clicked and work is in progress: disables it,
 // adds a spinner, and swaps its label (e.g. "Sending code..."). Returns a
 // function that puts the button back (optionally with a new label).
@@ -651,10 +657,8 @@ async function onLogHours(event) {
     if (!(hours > 0 && hours <= 24)) { setStatus("hours-status", "Hours must be between 0 and 24.", true); return; }
     if (travel < 0 || travel > 24) { setStatus("hours-status", "Travel hours must be between 0 and 24.", true); return; }
     if (needsNote(type, notes)) { setStatus("hours-status", "Add a note describing the work when the type is Other.", true); $("hours-notes").focus(); return; }
-    const existing = myEntry(eventId, type);
-    if (existing && !confirmReplace("You", existing, eventId, hours, travel, type)) {
-        setStatus("hours-status", "Not saved. Your earlier entry was kept.", true); return;
-    }
+    const release = startSave($("hours-form"), "Saving\u2026");
+    if (!release) { return; }
     try {
         await logVolunteerHours(eventId, hours, travel, notes, type);
         $("hours-form").reset();          // clear event, type (back to Event Day), hours, travel and notes
@@ -663,37 +667,15 @@ async function onLogHours(event) {
         setStatus("hours-status", "Hours logged.", false);
         await loadHours();
     } catch (err) { setStatus("hours-status", err.message, true); }
+    finally { release(); }
 }
-function myEntry(eventId, type) {
-    return (memberStats.allRows || []).filter(function (r) {
-        return r.event_id === eventId && (r.hour_type || DEFAULT_HOUR_TYPE) === type; })[0];
-}
-// When the event or type changes, say if an entry of that type already exists.
+// When the type changes, mark the note required for Other.
 function onLogChoiceChange() {
     syncNoteRequired($("hours-type"), $("hours-notes"), $("hours-notes-label"));
-    const eventId = $("event-select").value, type = $("hours-type").value;
-    const ex = eventId ? myEntry(eventId, type) : null;
-    if (ex) { setInfo("hours-status", "You already logged " + fmtNum(ex.hours) + " " + type + " hours for this event. Saving will replace them."); }
-    else if ($("hours-status").className.indexOf("info") >= 0) { setStatus("hours-status", "", false); }
-}
-// "You already logged ... Replace?" Returns true if it's OK to save.
-function confirmReplace(who, existing, eventId, hours, travel, type) {
-    const evName = eventName(eventId);
-    const self = who === "You";
-    type = type || DEFAULT_HOUR_TYPE;
-    return window.confirm(who + (self ? " already logged " : " already has ") + fmtNum(existing.hours) + " " + type + " hours"
-        + (Number(existing.travel_time) > 0 ? " + " + fmtNum(existing.travel_time) + " travel" : "")
-        + (self ? "" : " logged") + " for \u201c" + evName + "\u201d.\n\nReplace that entry with " + fmtNum(hours) + " hours"
-        + (travel > 0 ? " + " + fmtNum(travel) + " travel" : "") + "?");
-}
-function eventName(eventId) {
-    const list = (memberEvents || []).concat(eventsCache || []);
-    const ev = list.filter(function (e) { return e.id === eventId; })[0];
-    return ev ? ev.name : "this event";
 }
 // Jump to the Log hours form with an event chosen (from an event card or the
-// QR check-in banner). Type starts at Event Day; an existing Event Day entry
-// is filled in.
+// QR check-in banner). Type starts at Event Day; the form starts empty because
+// saving always adds a new entry.
 function goLogHours(eventId) {
     const sel = $("event-select");
     const ok = Array.prototype.some.call(sel.options, function (o) { return o.value === eventId; });
@@ -701,14 +683,8 @@ function goLogHours(eventId) {
     if (!ok) { setStatus("hours-status", "That event isn't available for logging.", true); return; }
     sel.value = eventId;
     $("hours-type").value = DEFAULT_HOUR_TYPE;
-    const existing = myEntry(eventId, DEFAULT_HOUR_TYPE);
-    if (existing) {
-        $("hours-input").value = existing.hours; $("travel-input").value = existing.travel_time;
-        $("hours-notes").value = existing.notes || "";
-    } else {
-        $("hours-input").value = ""; $("travel-input").value = ""; $("hours-notes").value = "";
-        setStatus("hours-status", "", false);
-    }
+    $("hours-input").value = ""; $("travel-input").value = ""; $("hours-notes").value = "";
+    setStatus("hours-status", "", false);
     onLogChoiceChange();
     updateTotalPreview();
     setTimeout(function () { $("hours-input").focus(); }, 400);
@@ -1578,11 +1554,9 @@ async function onLogForMember(event) {
     if (!(hours > 0 && hours <= 24)) { setStatus("log-status", "Hours must be between 0 and 24.", true); return; }
     if (travel < 0 || travel > 24) { setStatus("log-status", "Travel hours must be between 0 and 24.", true); return; }
     if (needsNote(type, notes)) { setStatus("log-status", "Add a note describing the work when the type is Other.", true); $("log-notes-input").focus(); return; }
+    const release = startSave($("log-form"), "Saving\u2026");
+    if (!release) { return; }
     try {
-        const existing = await adminGetHoursEntry(memberId, eventId, type);
-        if (existing && !confirmReplace(memberName(memberId), existing, eventId, hours, travel, type)) {
-            setStatus("log-status", "Not saved. The earlier entry was kept.", true); return;
-        }
         await adminLogHoursFor(memberId, eventId, hours, travel, notes, type);
         $("log-form").reset();            // clear person, event, type, hours, travel and notes
         clearLogMember();                 // hidden person id isn't cleared by reset()
@@ -1591,6 +1565,7 @@ async function onLogForMember(event) {
         setStatus("log-status", "Hours saved.", false);
         await refreshDerived();
     } catch (err) { setStatus("log-status", err.message, true); }
+    finally { release(); }
 }
 function onBulkSearch() {
     const term = $("bulk-search").value.trim().toLowerCase();
@@ -1689,30 +1664,17 @@ async function onBulkSubmit(event) {
         entries.push({ member_id: rows[i].dataset.memberId, hours: hours, travel: travel,
             notes: notesEl ? notesEl.value.trim() : "", hour_type: type });
     }
+    const release = startSave($("bulk-form"), "Saving\u2026");
+    if (!release) { return; }
     try {
-        // Warn before replacing anyone's existing entry for this event.
-        const existing = await adminListHoursForEvent(eventId);
-        const byMember = {};
-        (existing || []).forEach(function (r) {
-            if ((r.hour_type || DEFAULT_HOUR_TYPE) === type) { byMember[r.member_id] = r; } });
-        const clashes = entries.filter(function (e) { return byMember[e.member_id]; });
-        if (clashes.length) {
-            const lines = clashes.slice(0, 10).map(function (e) {
-                const r = byMember[e.member_id];
-                return "\u2022 " + memberName(e.member_id) + ": " + fmtNum(r.total_hours) + " hrs now \u2192 "
-                    + fmtNum(e.hours + e.travel) + " hrs";
-            });
-            if (clashes.length > 10) { lines.push("\u2022 \u2026and " + (clashes.length - 10) + " more"); }
-            const msg = clashes.length + (clashes.length === 1 ? " person already has" : " people already have")
-                + " " + type + " hours for \u201c" + eventName(eventId) + "\u201d:\n\n" + lines.join("\n")
-                + "\n\nReplace their existing entries?";
-            if (!window.confirm(msg)) { setStatus("bulk-status", "Not saved. Nothing was changed.", true); return; }
-        }
         const count = await adminBulkLogHours(eventId, entries);
-        setStatus("bulk-status", "Saved " + count + " entries.", false);
+        const skipped = entries.length - count;
+        setStatus("bulk-status", "Saved " + count + " entries."
+            + (skipped > 0 ? " Skipped " + skipped + " identical to entries saved in the last minute." : ""), false);
         bulkRows = []; renderBulkRows();
         await refreshDerived();
     } catch (err) { setStatus("bulk-status", err.message, true); }
+    finally { release(); }
 }
 
 // ---- Manage existing hours entries ---------------------------------
