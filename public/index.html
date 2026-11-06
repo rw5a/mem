@@ -8,7 +8,7 @@
   // Apply saved theme before first paint (light is the default).
   (function () { try { if (localStorage.getItem("mmp.theme") === "dark") { document.documentElement.setAttribute("data-theme", "dark"); } } catch (e) {} })();
 </script>
-<link rel="stylesheet" href="styles.css?v=2026-11-06b">
+<link rel="stylesheet" href="styles.css?v=2026-11-06d">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#003e73">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
@@ -173,14 +173,19 @@
       <form id="hours-form">
         <label for="event-select">Event</label>
         <select id="event-select"></select>
+        <label for="hours-type">Type of hours</label>
+        <select id="hours-type" class="hours-type"><option value="Event Day" selected>Event Day</option><option value="Administrative Work">Administrative Work</option><option value="Other">Other</option></select>
+        <p class="flag-note">You can log one entry of each type per event, including events that haven't happened yet
+           (e.g. administrative work beforehand). To change an entry, use Edit in <em>My logged hours</em> below
+           (available until <span class="self-edit-days">30</span> days after the event).</p>
         <div class="grid3">
-          <div><label for="hours-input">Event hours (0-24)</label>
+          <div><label for="hours-input">Hours (0-24)</label>
             <input id="hours-input" type="number" step="0.25" min="0" max="24"></div>
           <div><label for="travel-input">Travel hours (0-24)</label>
             <input id="travel-input" type="number" step="0.25" min="0" max="24"></div>
           <div><label>Total</label><div class="readonly"><span id="total-preview">0</span></div></div>
         </div>
-        <label for="hours-notes">Notes</label>
+        <label for="hours-notes" id="hours-notes-label">Notes</label>
         <textarea id="hours-notes" rows="2"></textarea>
         <button type="submit">Log hours</button>
         <p id="hours-status" class="status" role="status" aria-live="polite"></p>
@@ -204,8 +209,8 @@
       <div class="table-wrap" role="region" tabindex="0" aria-label="My logged hours table">
         <table>
           <caption class="sr-only">My logged volunteer hours</caption>
-          <thead><tr><th scope="col">Date</th><th scope="col">Event</th><th scope="col">Event hrs</th><th scope="col">Travel</th>
-            <th scope="col">Total</th><th scope="col">Notes</th></tr></thead>
+          <thead><tr><th scope="col">Date</th><th scope="col">Event</th><th scope="col">Type</th><th scope="col">Hours</th><th scope="col">Travel</th>
+            <th scope="col">Total</th><th scope="col">Notes</th><th scope="col">Actions</th></tr></thead>
           <tbody id="hours-body"></tbody>
         </table>
       </div>
@@ -256,6 +261,7 @@
         <button id="new-member-btn" type="button">New person</button>
         <button id="export-members" type="button" class="secondary">Export people</button>
         <button id="export-hours" type="button" class="secondary">Export hours</button>
+        <button id="export-renewals" type="button" class="secondary">Export renewals due</button>
       </div>
       <div class="toolbar">
         <button id="download-template" type="button" class="secondary">Download CSV template</button>
@@ -306,6 +312,13 @@
           <input id="show-archived" type="checkbox"> Show archived</label>
         <p class="count-line" id="members-count" aria-live="polite"></p>
       </div>
+      <details id="dupes" class="dupes" hidden>
+        <summary id="dupes-summary">Possible duplicates</summary>
+        <p class="flag-note">People who share a phone number, a name, or an email name. Click <strong>Open</strong>
+           on the profile you want to <strong>keep</strong>; the merge search below the edit form is filled in
+           with the other profile so you can review and merge.</p>
+        <div id="dupes-body"></div>
+      </details>
       <p class="flag-note">Select a row to edit. Click a column header to sort. Highlighted rows need attention (lapsed or suspended members).</p>
       <div class="table-wrap" role="region" tabindex="0" aria-label="People table">
         <table>
@@ -475,6 +488,16 @@
     <div role="tabpanel" id="apanel-summary" aria-labelledby="atab-summary" hidden>
     <section>
       <h2>Volunteer hours by event</h2>
+      <div class="range-bar">
+        <div><label for="sum-range">Period (by event date)</label><select id="sum-range"></select></div>
+        <div class="custom-range" id="sum-custom" hidden>
+          <div><label for="sum-from">From</label><input id="sum-from" type="date"></div>
+          <div><label for="sum-to">To</label><input id="sum-to" type="date"></div>
+        </div>
+        <button id="sum-export" type="button" class="secondary">Export event summary</button>
+        <button id="sum-export-entries" type="button" class="secondary">Export hour entries</button>
+      </div>
+      <p id="sum-totals" class="meta-line" aria-live="polite"></p>
       <div class="table-tools">
         <label class="sr-only" for="summary-search">Search event summary</label>
         <input id="summary-search" type="search" placeholder="Search events or locations...">
@@ -486,7 +509,8 @@
         <table>
           <caption class="sr-only">Volunteer hours by event</caption>
           <thead><tr><th scope="col">Event</th><th scope="col">Start</th><th scope="col">Location</th>
-            <th scope="col">RSVP</th><th scope="col">Attended</th><th scope="col">Logged</th><th scope="col">Total hours</th></tr></thead>
+            <th scope="col">RSVP</th><th scope="col">Attended</th><th scope="col">People logged</th>
+            <th scope="col">Event Day hrs</th><th scope="col">Admin Work hrs</th><th scope="col">Other hrs</th><th scope="col">Total hours</th></tr></thead>
           <tbody id="summary-body"></tbody>
         </table>
       </div>
@@ -499,18 +523,24 @@
     <section>
       <h2>Log hours for a person</h2>
       <form id="log-form">
-        <label for="log-member-select">Person</label>
-        <select id="log-member-select"></select>
+        <label for="log-member-search">Person</label>
+        <input id="log-member-search" type="search" placeholder="Type a name or email..." autocomplete="off"
+               aria-describedby="log-member-chosen" aria-controls="log-member-results">
+        <input id="log-member-select" type="hidden">
+        <div id="log-member-results" class="search-results" role="listbox" aria-label="Matching people"></div>
+        <p id="log-member-chosen" class="chosen-line" aria-live="polite"></p>
         <label for="log-event-select">Event</label>
         <select id="log-event-select"></select>
+        <label for="log-type">Type of hours</label>
+        <select id="log-type" class="hours-type"><option value="Event Day" selected>Event Day</option><option value="Administrative Work">Administrative Work</option><option value="Other">Other</option></select>
         <div class="grid3">
-          <div><label for="log-hours-input">Event hours (0-24)</label>
+          <div><label for="log-hours-input">Hours (0-24)</label>
             <input id="log-hours-input" type="number" step="0.25" min="0" max="24"></div>
           <div><label for="log-travel-input">Travel hours (0-24)</label>
             <input id="log-travel-input" type="number" step="0.25" min="0" max="24"></div>
           <div><label>Total</label><div class="readonly"><span id="log-total-preview">0</span></div></div>
         </div>
-        <label for="log-notes-input">Notes</label>
+        <label for="log-notes-input" id="log-notes-label">Notes</label>
         <input id="log-notes-input" type="text">
         <button type="submit">Save hours</button>
         <p id="log-status" class="status" role="status" aria-live="polite"></p>
@@ -522,13 +552,16 @@
       <form id="bulk-form">
         <label for="bulk-event-select">Event</label>
         <select id="bulk-event-select"></select>
+        <label for="bulk-type">Type of hours (applies to every row)</label>
+        <select id="bulk-type" class="hours-type"><option value="Event Day" selected>Event Day</option><option value="Administrative Work">Administrative Work</option><option value="Other">Other</option></select>
+        <p class="flag-note" id="bulk-type-note" hidden>Type is <strong>Other</strong>: every row needs a note.</p>
         <label for="bulk-search">Add person (search)</label>
         <input id="bulk-search" type="search" placeholder="Type a name or email...">
         <div id="bulk-search-results" class="search-results"></div>
         <div class="table-wrap" role="region" tabindex="0" aria-label="Bulk hours entry table" style="margin-top:.6rem">
           <table>
             <caption class="sr-only">People to log hours for</caption>
-            <thead><tr><th scope="col">Name</th><th scope="col">Event hrs</th>
+            <thead><tr><th scope="col">Name</th><th scope="col">Hours</th>
               <th scope="col">Travel</th><th scope="col">Notes</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
             <tbody id="bulk-body"></tbody>
           </table>
@@ -554,7 +587,7 @@
       <div class="table-wrap" role="region" tabindex="0" aria-label="Hours entries table">
         <table>
           <caption class="sr-only">Hours entries for the selected event</caption>
-          <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Event hrs</th>
+          <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Type</th><th scope="col">Hours</th>
             <th scope="col">Travel</th><th scope="col">Total</th><th scope="col">Notes</th><th scope="col">Actions</th></tr></thead>
           <tbody id="manage-body"></tbody>
         </table>
@@ -594,11 +627,12 @@
 <!-- Filled in just before printing (hours summary or QR code); hidden on screen -->
 <div id="print-area" aria-hidden="true"></div>
 
+<div id="toast-host" class="toast-host" aria-hidden="true"></div>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js" integrity="sha384-iU8HYtnGQ8Cy4zl7gbNMOhsDTTKX02BTXptVP/vqAWIaTfM7isw76iyZCsjL2eVi" crossorigin="anonymous"></script>
 <script src="env.js"></script>
-<script src="config.js?v=2026-11-06b"></script>
-<script src="api.js?v=2026-11-06b"></script>
+<script src="config.js?v=2026-11-06d"></script>
+<script src="api.js?v=2026-11-06d"></script>
 <script src="vendor/qrcode.js"></script>
-<script src="app.js?v=2026-11-06b"></script>
+<script src="app.js?v=2026-11-06d"></script>
 </body>
 </html>
