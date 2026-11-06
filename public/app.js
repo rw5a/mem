@@ -20,7 +20,8 @@ let eventsCache = [];
 let bulkRows = [];
 let memberFilter = "all";
 let summaryRows = [];
-const memberStats = { rows: [], upcoming: 0 };
+const memberStats = { rows: [], allRows: [], upcoming: 0 };
+let memberEvents = [];
 const charts = {};
 let pageIndex = 0, searchTerm = "", sortKey = "full_name", sortDir = "asc", showArchived = false;
 
@@ -200,6 +201,7 @@ async function enterApp() {
     showMemberView();
     await Promise.all([loadMemberEvents(), loadHours()]);
     renderMemberDash();
+    await processPendingCheckin();
 }
 function showMemberView() {
     show("member-view"); hide("admin-view");
@@ -354,11 +356,13 @@ async function onSaveProfile(event) {
         setStatus("profile-status", "Profile saved.", false);
         fillMemberProfile(me);      // re-run the gate: reveal events + hours once complete
         await loadMemberEvents();
+        await processPendingCheckin();
     } catch (err) { setStatus("profile-status", err.message, true); }
 }
 async function loadMemberEvents() {
     try {
         const events = await listEvents();
+        memberEvents = events;
         try {
             const att = await getMemberAttendance(myMemberId);
             attendanceMap = {};
@@ -551,25 +555,33 @@ async function onLogHours(event) {
 async function loadHours() {
     if (!myMemberId) { return; }
     try {
-        const rows = await getMemberVolunteerHours(myMemberId);
-        const tbody = $("hours-body"); tbody.innerHTML = "";
-        memberStats.rows = rows;
-        const limit = Math.min(rows.length, MAX_RENDER_ROWS);
-        for (let i = 0; i < limit; i += 1) {
-            const r = rows[i];
-            const tr = document.createElement("tr");
-            tr.dataset.travel = String(Number(r.travel_time) > 0 ? 1 : 0);
-            tr.dataset.notes = r.notes ? "1" : "0";
-            addCell(tr, r.events ? r.events.name : "");
-            addCell(tr, String(r.hours));
-            addCell(tr, String(r.travel_time));
-            addCell(tr, String(r.total_hours));
-            addCell(tr, r.notes || "");
-            tbody.appendChild(tr);
-        }
-        tfRefresh("hours");
-        renderMemberDash();
+        memberStats.allRows = await getMemberVolunteerHours(myMemberId);
+        fillRangeOptions($("hours-range"), yearsOf(memberStats.allRows), true, hoursRange);
+        renderHoursView();
     } catch (err) { setStatus("hours-status", err.message, true); }
+}
+// Re-draws "My logged hours", the summary cards and charts for the chosen period.
+function renderHoursView() {
+    const rows = sortByEventDate(rowsInRange(memberStats.allRows || [], hoursRange), true);
+    memberStats.rows = rows;
+    const tbody = $("hours-body"); tbody.innerHTML = "";
+    const limit = Math.min(rows.length, MAX_RENDER_ROWS);
+    for (let i = 0; i < limit; i += 1) {
+        const r = rows[i];
+        const tr = document.createElement("tr");
+        tr.dataset.travel = String(Number(r.travel_time) > 0 ? 1 : 0);
+        tr.dataset.notes = r.notes ? "1" : "0";
+        addCell(tr, r.events ? fmtDate(r.events.start_at) : "");
+        addCell(tr, r.events ? r.events.name : "");
+        addCell(tr, String(r.hours));
+        addCell(tr, String(r.travel_time));
+        addCell(tr, String(r.total_hours));
+        addCell(tr, r.notes || "");
+        tbody.appendChild(tr);
+    }
+    tfRefresh("hours");
+    renderMilestones();
+    renderMemberDash();
 }
 
 // =====================================================================
@@ -889,6 +901,8 @@ function selectMember(m) {
     setStatus("merge-status", "", false);
     syncRenewal("e_type", "e_renewal");
     syncShirtDate("e_tier", "e_shirt_sent");
+    fillRangeOptions($("e_print_range"), yearsOf(eventsCache.map(function (e) { return { events: e }; })), false, null);
+    setStatus("e_print_status", "", false);
     show("edit-form");
 }
 // Merge: search for the profile to merge INTO the one being edited.
@@ -1044,6 +1058,7 @@ function selectEvent(ev) {
     $("ee_name").value = ev.name || ""; $("ee_location").value = ev.location || "";
     $("ee_start").value = toLocalInput(ev.start_at); $("ee_end").value = toLocalInput(ev.end_at);
     $("ee_desc").value = ev.description || "";
+    hide("qr-panel");
     show("edit-event-form");
 }
 async function onSaveEvent(event) {
@@ -1061,7 +1076,7 @@ async function onSaveEvent(event) {
         await loadAdminEvents(); await loadSummary();
     } catch (err) { setStatus("edit-event-status", err.message, true); }
 }
-function onCancelEditEvent() { selectedEventId = null; hide("edit-event-form"); }
+function onCancelEditEvent() { selectedEventId = null; hide("edit-event-form"); hide("qr-panel"); }
 
 // ---- Summary -------------------------------------------------------
 async function loadSummary() {
@@ -1347,6 +1362,7 @@ function initTabs() {
             t.tabIndex = on ? 0 : -1;
             const panel = $(t.getAttribute("aria-controls"));
             if (panel) { panel.hidden = !on; }
+            if (on && t.id === "atab-audit") { loadAudit(true); }
         });
         if (focus) { tab.focus(); }
     }
@@ -1380,6 +1396,13 @@ const TF_CFG = {
             { key: "all", label: "All", test: function () { return true; } },
             { key: "attention", label: "Needs attention", test: function (tr) { return tr.dataset.flag === "1"; } },
             { key: "hours", label: "Has hours", test: function (tr) { return tr.dataset.hours === "1"; } }] },
+    audit: { tbody: "audit-body", search: "audit-search", filters: "audit-filters", count: "audit-count",
+        list: [
+            { key: "all", label: "All", test: function () { return true; } },
+            { key: "members", label: "People", test: function (tr) { return tr.dataset.table === "members"; } },
+            { key: "events", label: "Events", test: function (tr) { return tr.dataset.table === "events"; } },
+            { key: "hours", label: "Hours", test: function (tr) { return tr.dataset.table === "volunteer_hours"; } },
+            { key: "important", label: "Important", test: function (tr) { return tr.dataset.important === "1"; } }] },
     manage: { tbody: "manage-body", search: "manage-search", filters: "manage-filters", count: "manage-count",
         list: [
             { key: "all", label: "All", test: function () { return true; } },
@@ -1492,7 +1515,8 @@ function renderMemberDash() {
         { label: "Membership", value: me.is_member ? cap(status) : "Not a member",
           sub: me.is_member ? (me.tier + " tier") : "Ask an administrator to add one",
           tone: status === "active" ? "ok" : (status === "lapsed" || status === "suspended") ? "warn" : "" },
-        { label: "Total hours logged", value: fmtNum(total), sub: rows.length + (rows.length === 1 ? " entry" : " entries") },
+        { label: hoursRange.kind === "all" ? "Total hours logged" : "Hours logged \u00b7 " + rangeLabel(hoursRange),
+          value: fmtNum(total), sub: rows.length + (rows.length === 1 ? " entry" : " entries") },
         { label: "Events attended", value: String(attended) },
         { label: "Upcoming events", value: String(memberStats.upcoming || 0) }
     ]);
@@ -1551,6 +1575,467 @@ function renderAdminDash() {
 }
 
 // ---- Wire up -------------------------------------------------------
+// =====================================================================
+// HOURS PERIODS, MILESTONES, PRINTABLE SUMMARY
+// =====================================================================
+const hoursRange = { kind: "all", year: null, from: "", to: "" };
+const MILESTONES = [10, 25, 50, 100, 250, 500, 1000, 2500];
+
+// "YYYY-MM-DD" for an instant, as a calendar date in the event time zone.
+function dateKey(iso) {
+    const v = toLocalInput(iso);
+    return v ? v.slice(0, 10) : "";
+}
+function fmtDate(iso) {
+    if (!iso) { return ""; }
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) { return ""; }
+    return d.toLocaleDateString(undefined, { timeZone: EVENT_TZ, month: "short", day: "numeric", year: "numeric" });
+}
+function fmtDayKey(key) {          // "2026-03-01" -> "Mar 1, 2026" (no time-zone shifting)
+    if (!key) { return ""; }
+    const p = key.split("-").map(Number);
+    return new Date(Date.UTC(p[0], p[1] - 1, p[2], 12)).toLocaleDateString(undefined,
+        { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+}
+function rowDateKey(r) {
+    return dateKey((r.events && r.events.start_at) || r.logged_at);
+}
+function yearsOf(rows) {
+    const set = {};
+    set[String(tzParts(Date.now()).y)] = true;
+    rows.forEach(function (r) { const k = rowDateKey(r); if (k) { set[k.slice(0, 4)] = true; } });
+    return Object.keys(set).sort().reverse();
+}
+// Fills a period <select>: All time, each year, and optionally "Custom range...".
+function fillRangeOptions(select, years, withCustom, state) {
+    if (!select) { return; }
+    const current = select.value;
+    select.innerHTML = "";
+    const add = function (value, text) {
+        const o = document.createElement("option"); o.value = value; o.textContent = text; select.appendChild(o);
+    };
+    add("all", "All time");
+    years.forEach(function (y) { add("y:" + y, y); });
+    if (withCustom) { add("custom", "Custom range…"); }
+    const wanted = state ? rangeToValue(state) : current;
+    select.value = Array.prototype.some.call(select.options, function (o) { return o.value === wanted; }) ? wanted : "all";
+}
+function rangeToValue(r) {
+    return r.kind === "year" ? "y:" + r.year : r.kind;
+}
+function rangeFromSelect(value, from, to) {
+    if (value && value.indexOf("y:") === 0) { return { kind: "year", year: value.slice(2), from: "", to: "" }; }
+    if (value === "custom") { return { kind: "custom", year: null, from: from || "", to: to || "" }; }
+    return { kind: "all", year: null, from: "", to: "" };
+}
+function rowsInRange(rows, range) {
+    if (range.kind === "all") { return rows.slice(); }
+    return rows.filter(function (r) {
+        const k = rowDateKey(r);
+        if (!k) { return false; }
+        if (range.kind === "year") { return k.slice(0, 4) === range.year; }
+        if (range.from && k < range.from) { return false; }
+        if (range.to && k > range.to) { return false; }
+        return true;
+    });
+}
+function rangeLabel(range) {
+    if (range.kind === "year") { return range.year; }
+    if (range.kind === "custom") {
+        if (range.from && range.to) { return fmtDayKey(range.from) + " – " + fmtDayKey(range.to); }
+        if (range.from) { return "From " + fmtDayKey(range.from); }
+        if (range.to) { return "Through " + fmtDayKey(range.to); }
+    }
+    return "All time";
+}
+function sortByEventDate(rows, newestFirst) {
+    return rows.slice().sort(function (a, b) {
+        const ka = rowDateKey(a), kb = rowDateKey(b);
+        return newestFirst ? (kb < ka ? -1 : kb > ka ? 1 : 0) : (ka < kb ? -1 : ka > kb ? 1 : 0);
+    });
+}
+function onHoursRangeChange() {
+    const sel = $("hours-range");
+    $("custom-range").hidden = sel.value !== "custom";
+    if (sel.value === "custom" && !$("range-from").value && !$("range-to").value) {
+        // Sensible default for a custom range: Jan 1 of this year through today.
+        const today = dateKey(new Date().toISOString());
+        $("range-from").value = today.slice(0, 4) + "-01-01";
+        $("range-to").value = today;
+    }
+    const r = rangeFromSelect(sel.value, $("range-from").value, $("range-to").value);
+    hoursRange.kind = r.kind; hoursRange.year = r.year; hoursRange.from = r.from; hoursRange.to = r.to;
+    renderHoursView();
+}
+
+// ---- Milestones (all-time total hours, including travel) ------------
+function renderMilestones() {
+    const host = $("milestone-body");
+    if (!host) { return; }
+    let total = 0;
+    (memberStats.allRows || []).forEach(function (r) { total += Number(r.total_hours) || 0; });
+    total = Math.round(total * 100) / 100;
+    host.innerHTML = "";
+    const earned = MILESTONES.filter(function (m) { return total >= m; });
+    const next = MILESTONES.filter(function (m) { return total < m; })[0];
+    const badges = document.createElement("div"); badges.className = "badges";
+    MILESTONES.forEach(function (m) {
+        const b = document.createElement("span");
+        const got = total >= m;
+        b.className = "milestone" + (got ? " earned" : "");
+        b.textContent = (got ? "★ " : "") + m + " hrs";
+        b.setAttribute("aria-label", m + " hours milestone, " + (got ? "earned" : "not yet earned"));
+        badges.appendChild(b);
+    });
+    host.appendChild(badges);
+    const p = document.createElement("p"); p.className = "milestone-next";
+    if (total === 0) {
+        p.textContent = "Log your first volunteer hours to start earning milestones.";
+        host.appendChild(p);
+    } else if (!next) {
+        p.textContent = "You've reached every milestone — " + fmtNum(total) + " hours. Thank you!";
+        host.appendChild(p);
+    } else {
+        const prev = earned.length ? earned[earned.length - 1] : 0;
+        p.textContent = fmtNum(total) + " hours so far · " + fmtNum(next - total) + " to go until " + next + " hours";
+        host.appendChild(p);
+        const bar = document.createElement("progress");
+        bar.className = "milestone-bar";
+        bar.max = next - prev; bar.value = total - prev;
+        bar.setAttribute("aria-label", "Progress toward the " + next + " hour milestone");
+        host.appendChild(bar);
+    }
+}
+
+// ---- Printing (hours summary or QR code) -----------------------------
+// Puts content into #print-area, prints only that, then cleans up.
+function printContent(html, kind) {
+    const area = $("print-area");
+    area.innerHTML = html;
+    area.className = "print-" + kind;
+    document.body.classList.add("printing");
+    let cleaned = false;
+    const cleanup = function () {
+        if (cleaned) { return; }
+        cleaned = true;
+        document.body.classList.remove("printing");
+        area.innerHTML = ""; area.className = "";
+        window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    // Let images (logo) load before opening the print dialog.
+    const imgs = Array.prototype.slice.call(area.querySelectorAll("img"));
+    Promise.all(imgs.map(function (img) {
+        return img.complete ? null : new Promise(function (res) { img.onload = img.onerror = res; setTimeout(res, 1500); });
+    })).then(function () {
+        window.print();
+        setTimeout(cleanup, 1000);   // some mobile browsers never fire afterprint
+    });
+}
+function orgHeaderHtml() {
+    if (typeof ORG === "undefined") { return ""; }
+    const lines = [ORG.address, ORG.phone, ORG.email, ORG.website].filter(Boolean).map(escapeHtml);
+    return "<div class='doc-org'>"
+        + (ORG.logo_url ? "<img class='doc-logo' src='" + escapeHtml(ORG.logo_url) + "' alt=''>" : "")
+        + "<div><div class='doc-org-name'>" + escapeHtml(ORG.name || "") + "</div>"
+        + (lines.length ? "<div class='doc-org-lines'>" + lines.join(" · ") + "</div>" : "")
+        + "</div></div>";
+}
+function printHoursSummary(person, rows, range) {
+    const list = sortByEventDate(rowsInRange(rows, range), false);
+    let ev = 0, tr = 0, tot = 0;
+    const body = list.map(function (r) {
+        ev += Number(r.hours) || 0; tr += Number(r.travel_time) || 0; tot += Number(r.total_hours) || 0;
+        const e = r.events || {};
+        return "<tr><td>" + escapeHtml(fmtDate(e.start_at)) + "</td><td>" + escapeHtml(e.name || "")
+            + "</td><td>" + escapeHtml(e.location || "") + "</td><td class='num'>" + fmtNum(r.hours)
+            + "</td><td class='num'>" + fmtNum(r.travel_time) + "</td><td class='num'>" + fmtNum(r.total_hours) + "</td></tr>";
+    }).join("");
+    const name = person.full_name || [person.first_name, person.last_name].filter(Boolean).join(" ") || person.email;
+    const generated = new Date().toLocaleDateString(undefined, { timeZone: EVENT_TZ, month: "long", day: "numeric", year: "numeric" });
+    const html = "<div class='doc'>" + orgHeaderHtml()
+        + "<h1>Volunteer Hours Summary</h1>"
+        + "<table class='doc-facts'><tbody>"
+        + "<tr><th>Name</th><td>" + escapeHtml(name) + "</td></tr>"
+        + "<tr><th>Email</th><td>" + escapeHtml(person.email || "") + "</td></tr>"
+        + "<tr><th>Period</th><td>" + escapeHtml(rangeLabel(range)) + "</td></tr>"
+        + "<tr><th>Total hours</th><td><strong>" + fmtNum(tot) + "</strong> (" + fmtNum(ev) + " event + " + fmtNum(tr) + " travel)</td></tr>"
+        + "</tbody></table>"
+        + (list.length
+            ? "<table class='doc-table'><thead><tr><th>Date</th><th>Event</th><th>Location</th><th class='num'>Event hrs</th><th class='num'>Travel</th><th class='num'>Total</th></tr></thead><tbody>"
+              + body + "</tbody><tfoot><tr><th colspan='3'>Total (" + list.length + (list.length === 1 ? " event" : " events") + ")</th><th class='num'>"
+              + fmtNum(ev) + "</th><th class='num'>" + fmtNum(tr) + "</th><th class='num'>" + fmtNum(tot) + "</th></tr></tfoot></table>"
+            : "<p>No volunteer hours were recorded for this period.</p>")
+        + "<div class='doc-sign'><div><span></span>Verified by (name and title)</div><div><span></span>Signature</div><div><span></span>Date</div></div>"
+        + "<p class='doc-foot'>Generated " + escapeHtml(generated) + " from the "
+        + escapeHtml((typeof ORG !== "undefined" && ORG.name) ? ORG.name + " " : "")
+        + "membership portal. Dates are in " + escapeHtml(EVENT_TZ.replace(/_/g, " ")) + " time.</p></div>";
+    printContent(html, "doc");
+}
+function onPrintMyHours() {
+    if (!me) { return; }
+    printHoursSummary(me, memberStats.allRows || [], hoursRange);
+}
+async function onPrintPersonHours() {
+    const person = allMembers.filter(function (m) { return m.id === selectedMemberId; })[0];
+    if (!person) { return; }
+    const button = $("e_print_hours");
+    const done = setBusy(button, "Preparing…");
+    try {
+        const rows = await getMemberVolunteerHours(person.id);
+        done();
+        printHoursSummary(person, rows, rangeFromSelect($("e_print_range").value));
+    } catch (err) { done(); setStatus("e_print_status", err.message, true); }
+}
+
+// =====================================================================
+// EVENT CHECK-IN BY QR CODE
+// =====================================================================
+const CHECKIN_KEY = "mmp.checkin";
+const CHECKIN_OPENS_HOURS_BEFORE = 2;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function checkinUrl(eventId) {
+    return location.origin + location.pathname + "?checkin=" + encodeURIComponent(eventId);
+}
+function qrSvg(text) {
+    const qr = qrcode(0, "M");
+    qr.addData(text);
+    qr.make();
+    return qr.createSvgTag({ cellSize: 8, margin: 4, scalable: true });
+}
+function qrCardHtml(ev) {
+    const url = checkinUrl(ev.id);
+    return "<div class='qr-event'>" + escapeHtml(ev.name) + "</div>"
+        + "<div class='qr-when'>" + escapeHtml(fmtDT(ev.start_at)) + (ev.location ? " · " + escapeHtml(ev.location) : "") + "</div>"
+        + "<div class='qr-img' role='img' aria-label='QR code to check in to " + escapeHtml(ev.name) + "'>" + qrSvg(url) + "</div>"
+        + "<div class='qr-cta'>Scan with your phone camera to check in</div>"
+        + "<div class='qr-url'>" + escapeHtml(url) + "</div>";
+}
+function selectedAdminEvent() {
+    return eventsCache.filter(function (e) { return e.id === selectedEventId; })[0];
+}
+function onShowQr() {
+    const ev = selectedAdminEvent();
+    if (!ev) { return; }
+    $("qr-card").innerHTML = qrCardHtml(ev);
+    setStatus("qr-status", "", false);
+    show("qr-panel");
+    $("qr-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function onPrintQr() {
+    const ev = selectedAdminEvent();
+    if (!ev) { return; }
+    printContent("<div class='qr-print-card'>" + orgHeaderHtml() + qrCardHtml(ev) + "</div>", "qr");
+}
+async function onCopyQrLink() {
+    const ev = selectedAdminEvent();
+    if (!ev) { return; }
+    try { await navigator.clipboard.writeText(checkinUrl(ev.id)); setStatus("qr-status", "Check-in link copied.", false); }
+    catch (err) { setStatus("qr-status", "Couldn't copy automatically. Link: " + checkinUrl(ev.id), true); }
+}
+
+// On page load: remember a ?checkin=<event id> from a scanned QR code, then
+// tidy the address bar so a refresh doesn't repeat it.
+function captureCheckinParam() {
+    let id = null;
+    try { id = new URLSearchParams(location.search).get("checkin"); } catch (e) { id = null; }
+    if (!id) { return; }
+    if (UUID_RE.test(id)) { try { sessionStorage.setItem(CHECKIN_KEY, id); } catch (e) { /* ignore */ } }
+    try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) { /* ignore */ }
+    if (loadSession() === null) {
+        setInfo("login-status", "Sign in to finish checking in to your event.");
+    }
+}
+function showCheckinBanner(state, message, actions) {
+    const banner = $("checkin-banner");
+    banner.className = "checkin-banner " + state;
+    $("checkin-text").textContent = message;
+    const host = $("checkin-actions"); host.innerHTML = "";
+    (actions || []).concat([{ label: "Dismiss", secondary: true, run: function () { banner.hidden = true; } }])
+        .forEach(function (a) {
+            const b = document.createElement("button");
+            b.type = "button"; b.textContent = a.label;
+            b.className = a.secondary ? "secondary small" : "small";
+            b.addEventListener("click", a.run);
+            host.appendChild(b);
+        });
+    banner.hidden = false;
+    banner.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function endOfEventDayMs(ev) {
+    const key = dateKey(ev.end_at || ev.start_at);
+    const iso = fromLocalInput(key + "T23:59");
+    return iso ? new Date(iso).getTime() + 59999 : 0;
+}
+async function processPendingCheckin() {
+    let id = null;
+    try { id = sessionStorage.getItem(CHECKIN_KEY); } catch (e) { id = null; }
+    if (!id || !me) { return; }
+    const clear = function () { try { sessionStorage.removeItem(CHECKIN_KEY); } catch (e) { /* ignore */ } };
+    const ev = memberEvents.filter(function (e) { return e.id === id; })[0];
+    if (!ev) { clear(); showCheckinBanner("error", "We couldn't find the event from that QR code. Ask the organizer for help."); return; }
+    const now = Date.now();
+    const opens = new Date(ev.start_at).getTime() - CHECKIN_OPENS_HOURS_BEFORE * 3600 * 1000;
+    if (now < opens) {
+        clear();
+        showCheckinBanner("info", "Check-in for " + ev.name + " opens " + fmtDT(new Date(opens).toISOString())
+            + ". Scan the code again then. You can RSVP below in the meantime.");
+        return;
+    }
+    if (now > endOfEventDayMs(ev)) {
+        clear();
+        showCheckinBanner("info", ev.name + " has ended, so QR check-in is closed. You can still mark attendance under Past events.");
+        return;
+    }
+    if (!profileComplete(me)) {   // keep it pending; finishes automatically after Save profile
+        showCheckinBanner("warn", "Almost there: add your first name, last name, and phone in My profile below, then Save, to finish checking in to " + ev.name + ".");
+        return;
+    }
+    clear();
+    const logHours = {
+        label: "Log hours for this event",
+        run: function () {
+            $("event-select").value = ev.id;
+            $("sec-log").scrollIntoView({ behavior: "smooth", block: "start" });
+            setTimeout(function () { $("hours-input").focus(); }, 400);
+        }
+    };
+    if (attendanceMap[ev.id]) {
+        showCheckinBanner("ok", "You're already checked in to " + ev.name + ".", [logHours]);
+        return;
+    }
+    try {
+        await setMyAttendance(ev.id, true);
+        attendanceMap[ev.id] = true;
+        await loadMemberEvents();
+        showCheckinBanner("ok", "✓ You're checked in to " + ev.name + ". Thanks for coming!", [logHours]);
+    } catch (err) {
+        showCheckinBanner("error", "Couldn't check you in: " + err.message);
+    }
+}
+
+// =====================================================================
+// INSTALL AS AN APP (home screen)
+// =====================================================================
+let installPrompt = null;
+function initInstall() {
+    if ("serviceWorker" in navigator && (location.protocol === "https:"
+            || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+        navigator.serviceWorker.register("sw.js").catch(function () { /* optional */ });
+    }
+    const ua = navigator.userAgent || "";
+    const isIos = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    const isAndroid = /Android/.test(ua);
+    const standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
+        || window.navigator.standalone === true;
+    if (standalone) {
+        hide("install-ios"); hide("install-android"); show("install-done");
+    } else if (isIos) { hide("install-android"); }
+    else if (isAndroid) { hide("install-ios"); }
+    window.addEventListener("beforeinstallprompt", function (e) {
+        e.preventDefault();
+        installPrompt = e;
+        show("install-btn");
+    });
+    $("install-btn").addEventListener("click", async function () {
+        if (!installPrompt) { return; }
+        installPrompt.prompt();
+        try { await installPrompt.userChoice; } catch (e) { /* ignore */ }
+        installPrompt = null;
+        hide("install-btn");
+    });
+    window.addEventListener("appinstalled", function () { hide("install-btn"); });
+}
+
+// =====================================================================
+// ADMIN: CHANGE HISTORY
+// =====================================================================
+const AUDIT_PAGE = 100;
+let auditOffset = 0;
+let auditBusy = false;
+const AUDIT_FIELDS = {
+    first_name: "First name", last_name: "Last name", email: "Email", phone: "Phone",
+    is_member: "Is member", membership_status: "Membership status", membership_type: "Membership type",
+    next_renewal_date: "Next renewal date", tier: "Tier", date_shirt_sent: "Date shirt sent",
+    address_line1: "Address line 1", address_line2: "Address line 2", city: "City", state: "State",
+    postal_code: "Postal code", shirt_size: "Shirt size", is_admin: "Admin", archived: "Archived",
+    auth_user_id: "Sign-in account", name: "Name", description: "Description", start_at: "Start",
+    end_at: "End", location: "Location", hours: "Event hours", travel_time: "Travel hours", notes: "Notes"
+};
+const AUDIT_HIDDEN = ["member_id", "event_id", "created_by"];
+const AUDIT_NOUN = { members: "person", events: "event", volunteer_hours: "hours" };
+
+function auditValue(field, v) {
+    if (v === null || v === undefined || v === "") { return "—"; }
+    if (field === "auth_user_id") { return "linked"; }
+    if (typeof v === "boolean") { return v ? "Yes" : "No"; }
+    if (field === "start_at" || field === "end_at") { return fmtDT(v); }
+    const text = String(v);
+    return text.length > 80 ? text.slice(0, 77) + "…" : text;
+}
+function auditWhat(row) {
+    const noun = AUDIT_NOUN[row.table_name] || row.table_name;
+    if (row.table_name === "volunteer_hours") {
+        return { insert: "Logged hours", update: "Changed hours", delete: "Removed hours" }[row.action];
+    }
+    return { insert: "Created ", update: "Updated ", delete: "Deleted " }[row.action] + noun;
+}
+function renderAuditRow(row) {
+    const tr = document.createElement("tr");
+    const changes = row.changes || {};
+    const fields = Object.keys(changes).filter(function (f) { return AUDIT_HIDDEN.indexOf(f) < 0; });
+    const important = row.action === "delete" || "is_admin" in changes || "archived" in changes
+        || (row.table_name === "members" && "membership_status" in changes && row.action === "update");
+    tr.dataset.table = row.table_name;
+    tr.dataset.important = important ? "1" : "0";
+    if (important) { tr.className = "flag"; }
+    addCell(tr, fmtDT(row.at));
+    addCell(tr, row.actor_label || "System");
+    addCell(tr, auditWhat(row));
+    addCell(tr, row.record_label || "");
+    ["When", "Changed by", "What", "Record"].forEach(function (l, i) { tr.cells[i].dataset.label = l; });
+    const td = document.createElement("td"); td.className = "audit-details"; td.dataset.label = "Details";
+    fields.forEach(function (f) {
+        const c = changes[f] || {};
+        const line = document.createElement("div");
+        const label = document.createElement("strong"); label.textContent = (AUDIT_FIELDS[f] || f) + ": ";
+        line.appendChild(label);
+        let text;
+        if (row.action === "update") { text = auditValue(f, c.old) + " → " + auditValue(f, c.new); }
+        else if (row.action === "insert") { text = auditValue(f, c.new); }
+        else { text = auditValue(f, c.old); }
+        line.appendChild(document.createTextNode(text));
+        td.appendChild(line);
+    });
+    if (!fields.length) { td.textContent = "—"; }
+    tr.appendChild(td);
+    return tr;
+}
+async function loadAudit(reset) {
+    if (auditBusy) { return; }
+    auditBusy = true;
+    if (reset) { auditOffset = 0; $("audit-body").innerHTML = ""; }
+    setInfo("audit-status", "Loading…");
+    try {
+        const rows = await adminFetchAudit(auditOffset, AUDIT_PAGE);
+        const tbody = $("audit-body");
+        rows.forEach(function (r) { tbody.appendChild(renderAuditRow(r)); });
+        auditOffset += rows.length;
+        $("audit-more").hidden = rows.length < AUDIT_PAGE;
+        setStatus("audit-status", "", false);
+        $("audit-status").className = "status";
+        if (!auditOffset) { setInfo("audit-status", "No changes recorded yet."); }
+        tfRefresh("audit");
+    } catch (err) {
+        const missing = /audit_log/.test(err.message) && /(does not exist|schema cache|not find)/i.test(err.message);
+        setStatus("audit-status", missing
+            ? "Change history isn't set up in the database yet. Run supabase/migrations/2026-11-change-history.sql in the Supabase SQL Editor."
+            : err.message, true);
+    } finally { auditBusy = false; }
+}
+
 // Shows a plain-English message on the sign-in screen when setup files are
 // missing or broken, instead of a confusing JavaScript error later on.
 function checkStartupConfig() {
@@ -1638,6 +2123,19 @@ window.addEventListener("DOMContentLoaded", function () {
     $("export-hours").addEventListener("click", onExportHours);
 
     $("remember-me").checked = rememberDevice();
+    initInstall();
+    captureCheckinParam();
+    $("hours-range").addEventListener("change", onHoursRangeChange);
+    $("range-from").addEventListener("change", onHoursRangeChange);
+    $("range-to").addEventListener("change", onHoursRangeChange);
+    $("print-hours").addEventListener("click", onPrintMyHours);
+    $("e_print_hours").addEventListener("click", onPrintPersonHours);
+    $("qr-btn").addEventListener("click", onShowQr);
+    $("qr-print").addEventListener("click", onPrintQr);
+    $("qr-copy").addEventListener("click", onCopyQrLink);
+    $("qr-close").addEventListener("click", function () { hide("qr-panel"); });
+    $("audit-more").addEventListener("click", function () { loadAudit(false); });
+    fillRangeOptions($("hours-range"), yearsOf([]), true, hoursRange);
     try {
         const notice = sessionStorage.getItem("mmp.notice");
         if (notice) { sessionStorage.removeItem("mmp.notice"); setStatus("login-status", notice, true); }
