@@ -239,7 +239,7 @@ async function logVolunteerHours(eventId, hours, travel, notes) {
     });
 }
 async function getMemberVolunteerHours(memberId) {
-    return apiFetch(REST_BASE + "/volunteer_hours?select=*,events(name,start_at)&member_id=eq."
+    return apiFetch(REST_BASE + "/volunteer_hours?select=*,events(name,start_at,location)&member_id=eq."
         + encodeURIComponent(memberId) + "&order=logged_at.desc",
         { method: "GET", headers: authHeaders() });
 }
@@ -370,4 +370,10 @@ async function adminUpdateHoursEntry(entryId, fields) {
 async function adminDeleteHoursEntry(entryId) {
     return apiFetch(REST_BASE + "/volunteer_hours?id=eq." + encodeURIComponent(entryId), {
         method: "DELETE", headers: authHeaders() });
+}
+
+// ---- ADMIN: change history (audit log), newest first ----------------
+async function adminFetchAudit(offset, limit) {
+    return apiFetch(REST_BASE + "/audit_log?select=*&order=at.desc,id.desc&limit=" + Number(limit)
+        + "&offset=" + Number(offset), { method: "GET", headers: authHeaders() });
 }
