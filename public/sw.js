@@ -6,7 +6,7 @@
 // Supabase requests (other origins) are never touched or cached.
 "use strict";
 
-const CACHE = "mmp-shell-v3";   // bump when deploying to drop old copies
+const CACHE = "mmp-shell-v5";   // bump when deploying to drop old copies
 const SHELL = ["./", "index.html", "styles.css", "app.js", "api.js", "config.js", "env.js",
     "vendor/qrcode.js", "manifest.webmanifest", "icons/icon-192.png"];
 
