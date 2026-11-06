@@ -457,3 +457,49 @@ html[data-theme="dark"] {
   #apanel-audit td { border: 0; padding: .2rem .6rem; }
   #apanel-audit td::before { content: attr(data-label); display: block; font-size: .75rem; font-weight: 700; color: var(--muted); }
 }
+
+/* ---- Toast messages (pinned so save results are seen on long pages) - */
+/* Screen readers already hear the inline status line, so toasts are aria-hidden. */
+.toast-host {
+  position: fixed; top: .75rem; left: 50%; transform: translateX(-50%); z-index: 1000;
+  display: flex; flex-direction: column; gap: .4rem; width: min(92vw, 30rem); pointer-events: none;
+}
+.toast {
+  pointer-events: auto; cursor: pointer; padding: .65rem .9rem; border-radius: 6px;
+  font-weight: 600; font-size: .95rem; box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  background: var(--b-ok-bg); color: var(--b-ok-fg); border-left: 4px solid var(--ok);
+  transition: opacity .3s ease, transform .3s ease;
+}
+.toast.error { background: var(--b-bad-bg); color: var(--b-bad-fg); border-left-color: var(--bad); }
+.toast.ok::before { content: "\2713  "; }
+.toast.error::before { content: "\2715  "; }
+.toast.leaving { opacity: 0; transform: translateY(-6px); }
+@media print { .toast-host { display: none !important; } }
+
+/* ---- Type-ahead result buttons (admin person picker) ----------------- */
+.search-results button.result {
+  display: block; width: 100%; text-align: left; margin: 0; border: 0; border-radius: 0;
+  border-bottom: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  padding: .45rem .6rem; font-size: .9rem; font-weight: 400;
+}
+.search-results button.result:last-child { border-bottom: 0; }
+.search-results button.result:hover, .search-results button.result:focus { background: var(--hover); }
+.search-results .no-match { padding: .45rem .6rem; color: var(--muted); font-size: .9rem; }
+.chosen-line { font-size: .9rem; color: var(--muted); margin: .3rem 0 0; min-height: 1.1rem; }
+.chosen-line strong { color: var(--ink); }
+
+/* ---- Past-event card "Log hours" button + my-hours row actions ------- */
+.event-card .log-btn { margin-top: .5rem; }
+.row-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+.row-actions button { margin-top: 0; }
+#hours-body input { width: 5.5rem; }
+#hours-body input.edit-notes { width: 100%; min-width: 8rem; }
+
+/* ---- Possible duplicates (People tab) -------------------------------- */
+.dupes { margin: .5rem 0 .75rem; border: .5px solid var(--line); border-left: 4px solid var(--warn); border-radius: 8px; padding: .5rem .9rem; background: var(--surface); }
+.dupes summary { cursor: pointer; font-weight: 700; color: var(--heading); }
+.dupe-group { border-top: 1px solid var(--line); padding: .5rem 0; }
+.dupe-why { font-size: .85rem; color: var(--warn-text); font-weight: 600; margin-bottom: .25rem; }
+.dupe-person { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; padding: .2rem 0; font-size: .92rem; }
+.dupe-person button { margin-top: 0; }
+.muted-cell { color: var(--muted); font-size: .85rem; white-space: nowrap; }
